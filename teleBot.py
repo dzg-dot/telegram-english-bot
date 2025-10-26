@@ -337,6 +337,37 @@ def main():
 
     print("Bot đang chạy...")
     application.run_polling(allowed_updates=Update.ALL_TYPES)
+import threading
+from flask import Flask
+import os
+
+# Flask server để Render thấy cổng mở
+app = Flask(__name__)
+
+@app.get("/")
+def health():
+    return "✅ Bot is alive", 200
+
+def start_flask():
+    port = int(os.getenv("PORT", "10000"))
+    app.run(host="0.0.0.0", port=port)
+
+def main():
+    # (phần code setup bot bạn đã có)
+    application = Application.builder().token(TELEGRAM_TOKEN).build()
+    application.add_handler(CommandHandler("start", start))
+    application.add_handler(CommandHandler("clear_history", clear_history))
+    application.add_handler(CommandHandler("ping", ping_cmd))
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+    application.add_error_handler(on_error)
+    application.post_init = on_startup
+
+    # Chạy Flask song song với bot
+    threading.Thread(target=start_flask, daemon=True).start()
+
+    print("Bot đang chạy (Web Service + Flask)...")
+    application.run_polling(allowed_updates=Update.ALL_TYPES, drop_pending_updates=True)
+
 
 if __name__ == "__main__":
     main()
