@@ -1,27 +1,43 @@
 import os
 import re
 import httpx
+import logging
 from dotenv import load_dotenv
 from openai import OpenAI
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
-load_dotenv()
-# --- load token Telegram ---
-TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 
+# logging
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s | %(levelname)s | %(name)s | %(message)s"
+)
+logger = logging.getLogger(__name__)
+
+# ghi lỗi tập trung
+async def on_error(update: object, context: ContextTypes.DEFAULT_TYPE):
+    logger.exception("Exception while handling an update:", exc_info=context.error)
+
+# xóa webhook khi khởi động (để dùng long-polling)
+async def on_startup(app: Application):
+    await app.bot.delete_webhook(drop_pending_updates=True)
+    logger.info("Webhook deleted, switching to long-polling.")
+
+load_dotenv()
+
+# --- Telegram token ---
+TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 if not TELEGRAM_TOKEN:
     raise RuntimeError("❌ TELEGRAM_TOKEN not found in .env file")
-# ----- chọn nguồn API -----
-USE_OPENROUTER = True  # True = dùng OpenRouter (khuyên dùng ở Nga). False = dùng OpenAI gốc.
 
+# --- chọn nguồn API qua ENV (mặc định True) ---
+USE_OPENROUTER = os.getenv("USE_OPENROUTER", "True").lower() == "true"
 OR_KEY = os.getenv("OPENROUTER_API_KEY")
 OA_KEY = os.getenv("OPENAI_API_KEY")
 
-# debug để chắc nhánh đúng
-print("DEBUG => USE_OPENROUTER=", USE_OPENROUTER,
-      "| OR_KEY?", bool(OR_KEY), "| OA_KEY?", bool(OA_KEY))
+print("DEBUG => USE_OPENROUTER=", USE_OPENROUTER, "| OR_KEY?", bool(OR_KEY), "| OA_KEY?", bool(OA_KEY))
 
-# HTTP client với timeout cao
+# HTTP client với timeout/connection pool
 httpx_client = httpx.Client(
     timeout=httpx.Timeout(connect=30.0, read=90.0, write=90.0, pool=90.0),
     limits=httpx.Limits(max_keepalive_connections=10, max_connections=20),
@@ -45,6 +61,7 @@ else:
         raise RuntimeError("OPENAI_API_KEY missing in .env")
     client = OpenAI(api_key=OA_KEY, http_client=httpx_client)
     MODEL_NAME = "gpt-3.5-turbo"
+
 # -------------------- CLASSROOM CONFIG --------------------
 # Mặc định ưu tiên tiếng Anh; nếu phát hiện học sinh nhắn tiếng Nga (Cyrillic) thì trả lời tiếng Nga
 DEFAULT_LANG = "auto"   # auto | en | ru
@@ -311,6 +328,12 @@ def main():
 
     # free text
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+
+    # đăng ký lệnh/handler như trước …
+    application.add_error_handler(on_error)
+
+    # xóa webhook trước khi run_polling
+    application.post_init = on_startup
 
     print("Bot đang chạy...")
     application.run_polling(allowed_updates=Update.ALL_TYPES)
