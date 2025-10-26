@@ -1,0 +1,5 @@
+python-telegram-bot==20.7
+openai==1.42.0
+python-dotenv
+httpx==0.25.2
+pydantic==2.9.2
