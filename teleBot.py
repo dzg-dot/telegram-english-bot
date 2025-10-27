@@ -1,43 +1,46 @@
 import os
 import re
-import httpx
+import time
 import logging
+import threading
+
+import httpx
 from dotenv import load_dotenv
 from openai import OpenAI
+from flask import Flask
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 
-# logging
+# ========== LOGGING ==========
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s | %(levelname)s | %(name)s | %(message)s"
 )
 logger = logging.getLogger(__name__)
 
-# ghi lỗi tập trung
+# ========== STARTUP HOOKS ==========
 async def on_error(update: object, context: ContextTypes.DEFAULT_TYPE):
     logger.exception("Exception while handling an update:", exc_info=context.error)
 
-# xóa webhook khi khởi động (để dùng long-polling)
 async def on_startup(app: Application):
+    # Xóa webhook cũ để dùng long-polling
     await app.bot.delete_webhook(drop_pending_updates=True)
     logger.info("Webhook deleted, switching to long-polling.")
 
+# ========== ENV & CLIENTS ==========
 load_dotenv()
 
-# --- Telegram token ---
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 if not TELEGRAM_TOKEN:
-    raise RuntimeError("❌ TELEGRAM_TOKEN not found in .env file")
+    raise RuntimeError("❌ TELEGRAM_TOKEN not found in environment")
 
-# --- chọn nguồn API qua ENV (mặc định True) ---
 USE_OPENROUTER = os.getenv("USE_OPENROUTER", "True").lower() == "true"
 OR_KEY = os.getenv("OPENROUTER_API_KEY")
 OA_KEY = os.getenv("OPENAI_API_KEY")
 
-print("DEBUG => USE_OPENROUTER=", USE_OPENROUTER, "| OR_KEY?", bool(OR_KEY), "| OA_KEY?", bool(OA_KEY))
+logger.info("DEBUG => USE_OPENROUTER=%s | OR_KEY? %s | OA_KEY? %s",
+            USE_OPENROUTER, bool(OR_KEY), bool(OA_KEY))
 
-# HTTP client với timeout/connection pool
 httpx_client = httpx.Client(
     timeout=httpx.Timeout(connect=30.0, read=90.0, write=90.0, pool=90.0),
     limits=httpx.Limits(max_keepalive_connections=10, max_connections=20),
@@ -45,25 +48,24 @@ httpx_client = httpx.Client(
 
 if USE_OPENROUTER:
     if not OR_KEY:
-        raise RuntimeError("OPENROUTER_API_KEY missing in .env")
+        raise RuntimeError("OPENROUTER_API_KEY missing in env")
     client = OpenAI(
         base_url="https://openrouter.ai/api/v1",
         api_key=OR_KEY,
         http_client=httpx_client,
         default_headers={
-            "HTTP-Referer": "https://t.me/SearchVocabBot",  # đổi thành link bot của bạn
+            "HTTP-Referer": "https://t.me/SearchVocabBot",
             "X-Title": "School English Bot",
         },
     )
     MODEL_NAME = "openai/gpt-4o-mini"
 else:
     if not OA_KEY:
-        raise RuntimeError("OPENAI_API_KEY missing in .env")
+        raise RuntimeError("OPENAI_API_KEY missing in env")
     client = OpenAI(api_key=OA_KEY, http_client=httpx_client)
     MODEL_NAME = "gpt-3.5-turbo"
 
-# -------------------- CLASSROOM CONFIG --------------------
-# Mặc định ưu tiên tiếng Anh; nếu phát hiện học sinh nhắn tiếng Nga (Cyrillic) thì trả lời tiếng Nga
+# ========== CLASSROOM DEFAULTS & HELPERS ==========
 DEFAULT_LANG = "auto"   # auto | en | ru
 MAX_HISTORY = 10
 
@@ -75,10 +77,8 @@ BANNED_KEYWORDS = [
     r"\bextremis(m|t)\b"
 ]
 
-# bản đồ lớp → mức CEFR khuyến nghị
 GRADE_TO_CEFR = {"6": "A2", "7": "A2+", "8": "B1-", "9": "B1"}
 
-# Chính sách lớp học an toàn (ưu tiên EN, dùng RU khi cần)
 POLICY = (
     "You are a safe classroom teaching assistant for English learning (grades 6–9, ages 12–15).\n"
     "- Answer in ENGLISH by default. If the user's message is in Russian, respond in RUSSIAN.\n"
@@ -88,19 +88,20 @@ POLICY = (
     "- Keep answers concise (<= 150 words). Vocabulary: include IPA and 2–3 short examples.\n"
 )
 
-# Lưu cấu hình người dùng: user_id -> {mode, lang, grade, cefr}
 user_prefs = {}
-
-# -------------------- UTILS --------------------
 CYRILLIC_RE = re.compile(r"[А-Яа-яЁё]")
 
 def detect_lang(text: str) -> str:
-    """Return 'ru' if message contains Cyrillic, else 'en'."""
     return "ru" if CYRILLIC_RE.search(text or "") else "en"
 
 def get_prefs(user_id: int):
     if user_id not in user_prefs:
-        user_prefs[user_id] = {"mode": "vocab", "lang": DEFAULT_LANG, "grade": "7", "cefr": GRADE_TO_CEFR["7"]}
+        user_prefs[user_id] = {
+            "mode": "vocab",
+            "lang": DEFAULT_LANG,
+            "grade": "7",
+            "cefr": GRADE_TO_CEFR["7"]
+        }
     return user_prefs[user_id]
 
 def blocked(text: str) -> bool:
@@ -113,10 +114,8 @@ def trim(s: str, max_chars: int = 900) -> str:
     s = re.sub(r"\n{3,}", "\n\n", (s or "").strip())
     return s if len(s) <= max_chars else (s[:max_chars].rstrip() + "…")
 
-import time
-
 async def ask_openai(messages, max_tokens=500):
-    # 3 lần thử với backoff 1s, 2s, 4s
+    """Gọi model với retry + fallback."""
     for attempt in range(3):
         try:
             resp = client.chat.completions.create(
@@ -128,14 +127,12 @@ async def ask_openai(messages, max_tokens=500):
             return resp.choices[0].message.content
         except Exception as e1:
             if attempt < 2:
-                time.sleep(2 ** attempt)  # backoff
+                time.sleep(2 ** attempt)
                 continue
-            # Fallback sang model khác khi thử 3 lần vẫn lỗi/time-out
+            # fallback
+            base_url = getattr(client, "base_url", "") or ""
+            fallback_model = "openai/gpt-3.5-turbo" if "openrouter.ai" in base_url else "gpt-3.5-turbo"
             try:
-                fallback_model = (
-                    "openai/gpt-3.5-turbo" if "openrouter.ai" in client.base_url
-                    else "gpt-3.5-turbo"
-                )
                 resp = client.chat.completions.create(
                     model=fallback_model,
                     messages=messages,
@@ -145,7 +142,8 @@ async def ask_openai(messages, max_tokens=500):
                 return resp.choices[0].message.content
             except Exception as e2:
                 return f"[OpenAI error] {type(e1).__name__}: {e1}"
-# -------------------- COMMANDS --------------------
+
+# ========== COMMANDS ==========
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "Hi! I’m your English study bot for grades 6–9.\n"
@@ -170,7 +168,7 @@ async def clear_history(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def grade_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     prefs = get_prefs(update.effective_user.id)
-    if not context.args or context.args[0] not in {"6","7","8","9"}:
+    if not context.args or context.args[0] not in {"6", "7", "8", "9"}:
         return await update.message.reply_text("Use: /grade 6|7|8|9")
     g = context.args[0]
     prefs["grade"] = g
@@ -186,13 +184,12 @@ async def mode_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def lang_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     prefs = get_prefs(update.effective_user.id)
-    if not context.args or context.args[0] not in {"auto","en","ru"}:
+    if not context.args or context.args[0] not in {"auto", "en", "ru"}:
         return await update.message.reply_text("Use: /lang auto|en|ru")
     prefs["lang"] = context.args[0]
     await update.message.reply_text(f"Response language: {prefs['lang']}")
-# -------------------- DIAGNOSTIC COMMAND --------------------
+
 async def ping_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Check OpenAI connection"""
     try:
         msg = [{"role": "user", "content": "Say 'pong' in one word."}]
         text = await ask_openai(msg, max_tokens=5)
@@ -200,8 +197,6 @@ async def ping_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         await update.message.reply_text(f"⚠️ OpenAI error: {e}")
 
-
-# -------------------- STUDY SHORTCUTS --------------------
 async def vocab_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     prefs = get_prefs(update.effective_user.id)
     if not context.args:
@@ -210,7 +205,6 @@ async def vocab_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if blocked(word):
         return await update.message.reply_text("⛔ Off-topic. Please ask study-related content.")
 
-    # auto language choice
     lang = prefs["lang"]
     if lang == "auto":
         lang = detect_lang(update.message.text)
@@ -257,10 +251,9 @@ async def quiz_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         text = await ask_openai(messages, max_tokens=600)
         await update.message.reply_text(trim(text))
     except Exception as e:
-      await update.message.reply_text(f"⚠️ OpenAI error: {e}")
+        await update.message.reply_text(f"⚠️ OpenAI error: {e}")
 
-
-# -------------------- FREE CHAT (steered by mode) --------------------
+# ========== FREE CHAT ==========
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_message = update.message.text or ""
     if blocked(user_message):
@@ -272,12 +265,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("Thinking…")
 
     prefs = get_prefs(update.effective_user.id)
-    # auto language detection if needed
     lang = prefs["lang"]
     if lang == "auto":
         lang = detect_lang(user_message)
 
-    # maintain short history
     history = context.user_data.get("history", [])
     history.append({"role": "user", "content": user_message})
     history = history[-MAX_HISTORY:]
@@ -310,38 +301,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         await update.message.reply_text(f"Error: {str(e)}. Please try again.")
 
-# -------------------- APP --------------------
-def main():
-    application = Application.builder().token(TELEGRAM_TOKEN).build()
-
-    # commands
-    application.add_handler(CommandHandler("start", start))
-    application.add_handler(CommandHandler("help", help_cmd))
-    application.add_handler(CommandHandler("clear_history", clear_history))
-    application.add_handler(CommandHandler("grade", grade_cmd))
-    application.add_handler(CommandHandler("mode", mode_cmd))
-    application.add_handler(CommandHandler("lang", lang_cmd))
-    application.add_handler(CommandHandler("vocab", vocab_cmd))
-    application.add_handler(CommandHandler("quiz", quiz_cmd))
-    application.add_handler(CommandHandler("ping", ping_cmd))
-
-
-    # free text
-    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
-
-    # đăng ký lệnh/handler như trước …
-    application.add_error_handler(on_error)
-
-    # xóa webhook trước khi run_polling
-    application.post_init = on_startup
-
-    print("Bot đang chạy...")
-    application.run_polling(allowed_updates=Update.ALL_TYPES)
-import threading
-from flask import Flask
-import os
-
-# Flask server để Render thấy cổng mở
+# ========== FLASK (KEEP PORT OPEN FOR RENDER) ==========
 app = Flask(__name__)
 
 @app.get("/")
@@ -352,22 +312,32 @@ def start_flask():
     port = int(os.getenv("PORT", "10000"))
     app.run(host="0.0.0.0", port=port)
 
+# ========== MAIN ==========
 def main():
-    # (phần code setup bot bạn đã có)
     application = Application.builder().token(TELEGRAM_TOKEN).build()
+
+    # Commands
     application.add_handler(CommandHandler("start", start))
+    application.add_handler(CommandHandler("help", help_cmd))
     application.add_handler(CommandHandler("clear_history", clear_history))
+    application.add_handler(CommandHandler("grade", grade_cmd))
+    application.add_handler(CommandHandler("mode", mode_cmd))
+    application.add_handler(CommandHandler("lang", lang_cmd))
+    application.add_handler(CommandHandler("vocab", vocab_cmd))
+    application.add_handler(CommandHandler("quiz", quiz_cmd))
     application.add_handler(CommandHandler("ping", ping_cmd))
+
+    # Free text
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+
+    # Hooks
     application.add_error_handler(on_error)
     application.post_init = on_startup
 
-    # Chạy Flask song song với bot
+    # Run Flask + polling
     threading.Thread(target=start_flask, daemon=True).start()
-
-    print("Bot đang chạy (Web Service + Flask)...")
+    logger.info("Bot is starting (Web Service + Flask)…")
     application.run_polling(allowed_updates=Update.ALL_TYPES, drop_pending_updates=True)
-
 
 if __name__ == "__main__":
     main()
