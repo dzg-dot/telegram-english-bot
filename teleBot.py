@@ -473,27 +473,27 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.user_data["history"].append({"role": "assistant", "content": text})
         await update.message.reply_text(trim(text))
 
-    # === DIALOGUE TURN COUNTING ===
-    prefs = get_prefs(update.effective_user.id)
-    if prefs["mode"] == "dialogue":
-        prefs["dialogue_turns"] = prefs.get("dialogue_turns", 0) + 1
-        limit = prefs.get("dialogue_limit", DEFAULT_DIALOGUE_LIMIT)
+        # === DIALOGUE TURN COUNTING ===
+        prefs = get_prefs(update.effective_user.id)
+        if prefs["mode"] == "dialogue":
+            prefs["dialogue_turns"] = prefs.get("dialogue_turns", 0) + 1
+            limit = prefs.get("dialogue_limit", DEFAULT_DIALOGUE_LIMIT)
 
-        if prefs["dialogue_turns"] >= limit:
-            lang = prefs.get("lang", "auto")
-            if lang == "ru":
-                msg = ("Отличная беседа! Хочешь немного потренироваться? "
-                       "Попробуй /vocab <слово> или /quiz по теме нашей беседы. "
-                       "Если хочешь продолжить — просто используй /talk <число> чтобы задать новый лимит.")
-            else:
-                msg = ("Great chat! Want to learn a bit more? "
-                       "Try /vocab <word> or /quiz about our topic. "
-                       "If you'd like to keep talking, use /talk <number> to set a new limit.")
-            await update.message.reply_text(msg)
-            prefs["dialogue_turns"] = 0
+            if prefs["dialogue_turns"] >= limit:
+                lang = prefs.get("lang", "auto")
+                if lang == "ru":
+                    msg = ("Отличная беседа! Хочешь немного потренироваться? "
+                           "Попробуй /vocab <слово> или /quiz по теме нашей беседы. "
+                           "Если хочешь продолжить — просто используй /talk <число> чтобы задать новый лимит.")
+                else:
+                    msg = ("Great chat! Want to learn a bit more? "
+                           "Try /vocab <word> or /quiz about our topic. "
+                           "If you'd like to keep talking, use /talk <number> to set a new limit.")
+                await update.message.reply_text(msg)
+                prefs["dialogue_turns"] = 0
 
-except Exception as e:
-    await update.message.reply_text(f"Error: {str(e)}. Please try again.")
+    except Exception as e:
+        await update.message.reply_text(f"Error: {str(e)}. Please try again.")
 
 # ========== FLASK (KEEP PORT OPEN FOR RENDER) ==========
 app = Flask(__name__)
