@@ -105,7 +105,7 @@ def get_prefs(user_id: int):
             "mode": "vocab",
             "lang": DEFAULT_LANG,
             "grade": "7",
-            "cefr": GRADE_TO_CEFR["7"]
+            "cefr": GRADE_TO_CEFR["7"],
             "dialogue_limit": DEFAULT_DIALOGUE_LIMIT,
         }
     return user_prefs[user_id]
