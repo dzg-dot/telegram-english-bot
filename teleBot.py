@@ -120,8 +120,8 @@ def trim(s: str, max_chars: int = 900) -> str:
     s = re.sub(r"\n{3,}", "\n\n", (s or "").strip())
     return s if len(s) <= max_chars else (s[:max_chars].rstrip() + "…")
 
-EN_ASK_ANS = re.compile(r"\b(give me answers|show answers|answers please)\b", re.I)
-RU_ASK_ANS = re.compile(r"(дай\s+ответы|покажи\s+ответы)", re.I)
+EN_ASK_ANS = re.compile(r"\b(give me answer|show answer|answer please)\b", re.I)
+RU_ASK_ANS = re.compile(r"(дай\s+ответ|покажи\s+ответ)", re.I)
 
 def is_answer_request(text: str) -> bool:
     t = (text or "").strip()
@@ -175,10 +175,10 @@ async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/vocab <word> – IPA, POS, definition in EN (RU), 2–3 short examples\n"
         "/quiz [topic] [A2|B1] – 5 MCQs with answer key\n"
         "/clear_history – clear chat context"
-        "/mode quiz – ask questions only; say “give me answers” to see key\n"
+        "/mode quiz – ask questions only; say “give me answer” to see key\n"
         "/talk [number] – start dialogue mode for [number] turns (default 10)\n"
         "/endtalk – end dialogue mode and return to study\n"
-        "\n💡In quiz mode, type *give me answers* to get the key.\n"
+        "\n💡In quiz mode, type *give me answer* to get the key.\n"
     )
 
 async def clear_history(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -363,69 +363,81 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         prompt_user = (
             f"Create a 5-question multiple-choice quiz (4 options each) on '{topic}', "
-            f"level {level}, for grades 6–9. "
-            f"Return STRICT JSON only (no prose, no markdown) with fields: "
-            f"questions: [{{id, question, options[4], correct (A|B|C|D), "
-            f"explain_en (<=25 words), explain_ru (<=25 words)}} x5]. "
+            f"level {level}, for grades 6–9.\n"
+            "Return STRICT JSON only, no prose, no markdown.\n"
+            "Format exactly:\n"
+            "{ \"questions\": ["
+            "{\"id\":1,\"question\":\"...\",\"options\":[\"...\",\"...\",\"...\",\"...\"],"
+            "\"correct\":\"A\",\"explain_en\":\"<=25 words\",\"explain_ru\":\"<=25 words\"},"
+            "{\"id\":2,...},{\"id\":3,...},{\"id\":4,...},{\"id\":5,...}"
+            "]}\n"
             f"Language for 'question' and 'options': "
-            f"{'Russian' if detect_lang(user_message)=='ru' else 'English'} at A2–B1 simplicity. "
-            f"Keep content school-safe."
-        )
-        messages = [
-            {"role": "system", "content": POLICY},
-            {"role": "user", "content": prompt_user},
-        ]
+            f"{'Russian' if lang=='ru' else 'English'} at A2–B1 simplicity.\n"
+            "Keep content school-safe."
+    )
 
-        raw = await ask_openai(messages, max_tokens=800)
+    messages = [
+        {"role": "system", "content": POLICY},
+        {"role": "user", "content": prompt_user},
+    ]
 
-        # parse JSON an toàn
-        import json
-        def extract_json(s: str):
-            s = s.strip()
-            if "```" in s:
-                parts = s.split("```")
-                for i in range(len(parts)-1):
-                    block = parts[i+1]
-                    if block.lstrip().startswith("json"):
-                        return json.loads(block.split("\n", 1)[1])
-                    try:
-                        return json.loads(block)
-                    except Exception:
-                        continue
-            return json.loads(s)
+    raw = await ask_openai(messages, max_tokens=800)
+       
+       
+    # === Parse JSON safely ===
+    import json
+    def extract_json(s: str):
+        s = s.strip()
+        if "```" in s:
+            parts = s.split("```")
+            for i in range(len(parts)-1):
+                block = parts[i+1]
+                if block.lstrip().startswith("json"):
+                    return json.loads(block.split("\n", 1)[1])
+                try:
+                    return json.loads(block)
+                except Exception:
+                    continue
+        return json.loads(s)
 
-        try:
-            data = extract_json(raw)
-        except Exception:
-            return await update.message.reply_text("Sorry, the quiz format failed. Please try again.")
+    try:
+        data = extract_json(raw)
+    except Exception:
+        return await update.message.reply_text("Sorry, the quiz format failed. Please try again.")
 
-        # Lưu đáp án + giải thích để / “give me answers”
-        key = []
-        for q in data.get("questions", []):
-            key.append({
-                "id": q.get("id"),
-                "correct": q.get("correct"),
-                "explain_en": q.get("explain_en"),
-                "explain_ru": q.get("explain_ru"),
-            })
-        context.user_data["last_quiz"] = {
+    # ✅ Lưu đáp án và giải thích, KHÔNG gửi cho học sinh
+    key = []
+    for q in data.get("questions", []):
+        key.append({
+            "id": q.get("id"),
+            "correct": q.get("correct"),
+            "explain_en": q.get("explain_en"),
+            "explain_ru": q.get("explain_ru"),
+        })
+    context.user_data["last_quiz"] = {
             "topic": topic,
             "level": level,
             "key": key
-        }
+    }
 
-        # Gửi cho HS: chỉ câu hỏi + 4 lựa chọn
-        blocks = []
-        for q in data.get("questions", []):
-            A, B, C, D = q.get("options", ["", "", "", ""])
-            _id = q.get("id")
-            blocks.append(
-                f"Q{_id}. {q.get('question')}\n"
-                f"A) {A}\nB) {B}\nC) {C}\nD) {D}"
-            )
-        tip = "Type: give me answers (or 'дай ответы') when you're ready."
-        await update.message.reply_text("\n\n".join(blocks) + "\n\n" + tip)
-        return  # ⬅️ rất quan trọng: kết thúc nhánh quiz tại đây
+    # ✅ Ẩn answer key: xoá trường correct/explain trước khi hiển thị
+    for q in data.get("questions", []):
+        q.pop("correct", None)
+        q.pop("explain_en", None)            
+        q.pop("explain_ru", None)
+
+    # ✅ Gửi cho học sinh: chỉ câu hỏi + 4 lựa chọn
+    blocks = []
+    for q in data.get("questions", []):
+        opts = q.get("options", ["", "", "", ""])
+        blocks.append(
+            f"Q{q.get('id')}. {q.get('question')}\n"
+            f"A) {opts[0]}\nB) {opts[1]}\nC) {opts[2]}\nD) {opts[3]}"
+        )
+
+    tip = "💡 When you're ready, type 'give me answer' (or 'дай ответ') to see the key."
+    await update.message.reply_text("\n\n".join(blocks) + "\n\n" + tip)
+    return
 
     # (phần còn lại) các mode khác: vocab/reading/grammar/dialogue…
     # xây mode_instruction, history, messages, gọi ask_openai như cũ    
