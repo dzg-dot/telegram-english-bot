@@ -167,6 +167,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "Commands:\n"
+        "/start – introduction message\n"
+        "/help – show this help list\n"
         "/grade 6|7|8|9 – set school grade (CEFR will adjust)\n"
         "/mode vocab|reading|grammar|quiz – choose study mode\n"
         "/lang auto|en|ru – response language (auto = detect)\n"
@@ -174,6 +176,9 @@ async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/quiz [topic] [A2|B1] – 5 MCQs with answer key\n"
         "/clear_history – clear chat context"
         "/mode quiz – ask questions only; say “give me answers” to see key\n"
+        "/talk [number] – start dialogue mode for [number] turns (default 10)\n"
+        "/endtalk – end dialogue mode and return to study\n"
+        "\n💡In quiz mode, type *give me answers* to get the key.\n"
     )
 
 async def clear_history(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -319,15 +324,6 @@ async def endtalk_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     prefs.pop("dialogue_turns", None)
     await update.message.reply_text("Dialogue ended. Back to study mode (vocab).")
 
-
-async def settalk_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Thay đổi số lượt hội thoại trước khi gợi ý học."""
-    prefs = get_prefs(update.effective_user.id)
-    if not context.args or not context.args[0].isdigit():
-        return await update.message.reply_text("Use: /settalk <number> (4–40)")
-    n = max(4, min(int(context.args[0]), 40))
-    prefs["dialogue_limit"] = n
-    await update.message.reply_text(f"Dialogue reminder set to every {n} turns.")
 
 # ========== FREE CHAT ==========
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -522,7 +518,6 @@ def main():
     application.add_handler(CommandHandler("ping", ping_cmd))
     application.add_handler(CommandHandler("talk", talk_cmd))
     application.add_handler(CommandHandler("endtalk", endtalk_cmd))
-    application.add_handler(CommandHandler("settalk", settalk_cmd))
 
 
     # Free text
