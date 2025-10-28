@@ -69,13 +69,18 @@ else:
 DEFAULT_LANG = "auto"   # auto | en | ru
 MAX_HISTORY = 10
 
-ALLOWED_MODES = {"vocab", "reading", "grammar", "quiz"}
+ALLOWED_MODES = {"vocab", "reading", "grammar", "quiz", "dialogue"}
 BANNED_KEYWORDS = [
     r"\bsex\b", r"\bporn\b", r"\berotic\b",
     r"\bviolence\b", r"\bsuicide\b", r"\bself[- ]?harm\b",
     r"\bdrugs?\b", r"\balcohol\b", r"\bgamble\b",
     r"\bextremis(m|t)\b"
 ]
+
+# === DIALOGUE CONFIG ===
+# Số lượt hội thoại tối đa trước khi bot gợi ý quay lại học tập.
+# Có thể chỉnh hoặc thay đổi bằng lệnh /settalk <số-lượt>.
+DEFAULT_DIALOGUE_LIMIT = 10
 
 GRADE_TO_CEFR = {"6": "A2", "7": "A2+", "8": "B1-", "9": "B1"}
 
@@ -101,6 +106,7 @@ def get_prefs(user_id: int):
             "lang": DEFAULT_LANG,
             "grade": "7",
             "cefr": GRADE_TO_CEFR["7"]
+            "dialogue_limit": DEFAULT_DIALOGUE_LIMIT,
         }
     return user_prefs[user_id]
 
@@ -113,6 +119,13 @@ def blocked(text: str) -> bool:
 def trim(s: str, max_chars: int = 900) -> str:
     s = re.sub(r"\n{3,}", "\n\n", (s or "").strip())
     return s if len(s) <= max_chars else (s[:max_chars].rstrip() + "…")
+
+EN_ASK_ANS = re.compile(r"\b(give me answers|show answers|answers please)\b", re.I)
+RU_ASK_ANS = re.compile(r"(дай\s+ответы|покажи\s+ответы)", re.I)
+
+def is_answer_request(text: str) -> bool:
+    t = (text or "").strip()
+    return bool(EN_ASK_ANS.search(t) or RU_ASK_ANS.search(t))
 
 async def ask_openai(messages, max_tokens=500):
     """Gọi model với retry + fallback."""
@@ -157,9 +170,10 @@ async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/grade 6|7|8|9 – set school grade (CEFR will adjust)\n"
         "/mode vocab|reading|grammar|quiz – choose study mode\n"
         "/lang auto|en|ru – response language (auto = detect)\n"
-        "/vocab <word> – IPA + short meaning + 2–3 examples\n"
+        "/vocab <word> – IPA, POS, definition in EN (RU), 2–3 short examples\n"
         "/quiz [topic] [A2|B1] – 5 MCQs with answer key\n"
         "/clear_history – clear chat context"
+        "/mode quiz – ask questions only; say “give me answers” to see key\n"
     )
 
 async def clear_history(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -201,29 +215,51 @@ async def vocab_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     prefs = get_prefs(update.effective_user.id)
     if not context.args:
         return await update.message.reply_text("Use: /vocab <word>")
-    word = " ".join(context.args)
-    if blocked(word):
+
+    headword = " ".join(context.args).strip()
+    if blocked(headword):
         return await update.message.reply_text("⛔ Off-topic. Please ask study-related content.")
 
-    lang = prefs["lang"]
-    if lang == "auto":
-        lang = detect_lang(update.message.text)
+    # Luôn hiển thị định nghĩa tiếng Anh + tiếng Nga trong ngoặc
+    # Nếu lang == ru (hoặc phát hiện chữ Cyrillic), thêm bản dịch Nga cho ví dụ
+    lang_for_examples = prefs.get("lang", "auto")
+    if lang_for_examples == "auto":
+        lang_for_examples = detect_lang(update.message.text or "")
+    include_ru_examples = (lang_for_examples == "ru")
 
-    prompt_user = (
-        f"User language: {lang}\n"
-        f"Grade: {prefs['grade']} (target {prefs['cefr']})\n"
-        f"Task: VOCAB card for '{word}'. Include IPA, concise meaning "
-        f"in user's language, and 2–3 short, school-safe examples at {prefs['cefr']} level."
+    prompt = (
+        "You are an English-learning assistant for grades 6–9 (CEFR A2–B1). "
+        "Create a concise, school-safe vocabulary card for the given word. "
+        "The definition must ALWAYS be in English with a short Russian translation in parentheses. "
+        "Follow the EXACT format and rules.\n\n"
+        f"HEADWORD: {headword}\n"
+        f"TARGET LEVEL: {prefs['cefr']}\n\n"
+        "FORMAT EXACTLY:\n"
+        "Word: <headword> /<IPA>/\n"
+        "POS: <part of speech>\n"
+        "Definition: <short English definition> (<short Russian translation>)\n"
+        "Examples:\n"
+        f"1) <short English sentence at A2–B1 level>{' (Russian translation)' if include_ru_examples else ''}\n"
+        f"2) <short English sentence>{' (Russian translation)' if include_ru_examples else ''}\n"
+        f"3) <short English sentence>{' (Russian translation, optional)' if include_ru_examples else ' (optional)'}\n\n"
+        "RULES:\n"
+        "- Keep total under 120 words; one-line definition.\n"
+        "- The definition MUST always include both English and Russian (in parentheses).\n"
+        "- Examples are in English; if user's language is Russian, add Russian translations in parentheses.\n"
+        "- Use common, school-safe sense of the word.\n"
+        "- Do not add commentary or headings beyond the specified format."
     )
+
     messages = [
         {"role": "system", "content": POLICY},
-        {"role": "user", "content": prompt_user},
+        {"role": "user", "content": prompt},
     ]
+
     try:
         text = await ask_openai(messages, max_tokens=350)
         await update.message.reply_text(trim(text))
     except Exception as e:
-        await update.message.reply_text(f"⚠️ OpenAI error: {e}")
+        await update.message.reply_text(f"⚠️ Vocab error: {e}")
 
 async def quiz_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     prefs = get_prefs(update.effective_user.id)
@@ -253,6 +289,46 @@ async def quiz_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         await update.message.reply_text(f"⚠️ OpenAI error: {e}")
 
+# === TALK MODE COMMANDS ===
+async def talk_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Bắt đầu chế độ hội thoại học tập."""
+    prefs = get_prefs(update.effective_user.id)
+    prefs["mode"] = "dialogue"
+    prefs["dialogue_turns"] = 0
+
+    # nếu nhập /talk 15 thì giới hạn 15 lượt
+    if context.args and context.args[0].isdigit():
+        prefs["dialogue_limit"] = max(4, min(int(context.args[0]), 40))
+    else:
+        prefs["dialogue_limit"] = DEFAULT_DIALOGUE_LIMIT
+
+    lang = prefs.get("lang", "auto")
+    if lang == "auto":
+        lang = detect_lang(update.message.text or "")
+    if lang == "ru":
+        opener = f"Привет! Давай немного поболтаем на английском. Как ты сегодня? (≈{prefs['dialogue_limit']} реплик)"
+    else:
+        opener = f"Hi! Let’s have a short English chat. How are you today? (≈{prefs['dialogue_limit']} turns)"
+    await update.message.reply_text(opener)
+
+
+async def endtalk_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Thoát chế độ hội thoại."""
+    prefs = get_prefs(update.effective_user.id)
+    prefs["mode"] = "vocab"
+    prefs.pop("dialogue_turns", None)
+    await update.message.reply_text("Dialogue ended. Back to study mode (vocab).")
+
+
+async def settalk_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Thay đổi số lượt hội thoại trước khi gợi ý học."""
+    prefs = get_prefs(update.effective_user.id)
+    if not context.args or not context.args[0].isdigit():
+        return await update.message.reply_text("Use: /settalk <number> (4–40)")
+    n = max(4, min(int(context.args[0]), 40))
+    prefs["dialogue_limit"] = n
+    await update.message.reply_text(f"Dialogue reminder set to every {n} turns.")
+
 # ========== FREE CHAT ==========
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_message = update.message.text or ""
@@ -269,17 +345,115 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if lang == "auto":
         lang = detect_lang(user_message)
 
+    # --- NEW: nếu học sinh yêu cầu hiển thị đáp án trong chế độ quiz ---
+    if prefs["mode"] == "quiz" and is_answer_request(user_message):
+        pack = context.user_data.get("last_quiz")
+        if not pack or not pack.get("key"):
+            return await update.message.reply_text("No quiz found yet. Try /mode quiz and give me a topic first.")
+        lang_show = prefs.get("lang", "auto")
+        if lang_show == "auto":
+            lang_show = detect_lang(user_message)
+        lines = [f"Answer key — topic: {pack['topic']} (level {pack['level']})"]
+        for item in pack["key"]:
+            expl = item.get("explain_en") or ""
+            if lang_show == "ru":
+                expl = item.get("explain_ru") or item.get("explain_en") or ""
+            lines.append(f"Q{item['id']}: {item['correct']} — {expl}")
+        return await update.message.reply_text("\n".join(lines))
+
+    if prefs["mode"] == "quiz":
+        topic = user_message.strip() or "school life"
+        level = prefs["cefr"]
+
+        prompt_user = (
+            f"Create a 5-question multiple-choice quiz (4 options each) on '{topic}', "
+            f"level {level}, for grades 6–9. "
+            f"Return STRICT JSON only (no prose, no markdown) with fields: "
+            f"questions: [{{id, question, options[4], correct (A|B|C|D), "
+            f"explain_en (<=25 words), explain_ru (<=25 words)}} x5]. "
+            f"Language for 'question' and 'options': "
+            f"{'Russian' if detect_lang(user_message)=='ru' else 'English'} at A2–B1 simplicity. "
+            f"Keep content school-safe."
+        )
+        messages = [
+            {"role": "system", "content": POLICY},
+            {"role": "user", "content": prompt_user},
+        ]
+
+        raw = await ask_openai(messages, max_tokens=800)
+
+        # parse JSON an toàn
+        import json
+        def extract_json(s: str):
+            s = s.strip()
+            if "```" in s:
+                parts = s.split("```")
+                for i in range(len(parts)-1):
+                    block = parts[i+1]
+                    if block.lstrip().startswith("json"):
+                        return json.loads(block.split("\n", 1)[1])
+                    try:
+                        return json.loads(block)
+                    except Exception:
+                        continue
+            return json.loads(s)
+
+        try:
+            data = extract_json(raw)
+        except Exception:
+            return await update.message.reply_text("Sorry, the quiz format failed. Please try again.")
+
+        # Lưu đáp án + giải thích để / “give me answers”
+        key = []
+        for q in data.get("questions", []):
+            key.append({
+                "id": q.get("id"),
+                "correct": q.get("correct"),
+                "explain_en": q.get("explain_en"),
+                "explain_ru": q.get("explain_ru"),
+            })
+        context.user_data["last_quiz"] = {
+            "topic": topic,
+            "level": level,
+            "key": key
+        }
+
+        # Gửi cho HS: chỉ câu hỏi + 4 lựa chọn
+        blocks = []
+        for q in data.get("questions", []):
+            A, B, C, D = q.get("options", ["", "", "", ""])
+            _id = q.get("id")
+            blocks.append(
+                f"Q{_id}. {q.get('question')}\n"
+                f"A) {A}\nB) {B}\nC) {C}\nD) {D}"
+            )
+        tip = "Type: give me answers (or 'дай ответы') when you're ready."
+        await update.message.reply_text("\n\n".join(blocks) + "\n\n" + tip)
+        return  # ⬅️ rất quan trọng: kết thúc nhánh quiz tại đây
+
+    # (phần còn lại) các mode khác: vocab/reading/grammar/dialogue…
+    # xây mode_instruction, history, messages, gọi ask_openai như cũ    
+
     history = context.user_data.get("history", [])
     history.append({"role": "user", "content": user_message})
     history = history[-MAX_HISTORY:]
     context.user_data["history"] = history
 
     mode_instruction = {
-        "vocab":   "Behave as VOCAB helper: IPA, brief meaning in user's language, 2–3 short examples (A2–B1).",
-        "reading": "Provide a short reading (80–120 words) on a school-safe topic + 2–3 comprehension questions.",
-        "grammar": "Explain the grammar point (A2–B1) in 3–5 concise bullets + 1–2 examples.",
-        "quiz":    "Create a 5-question MCQ quiz (4 options) for the user's topic; include answer key."
-    }[prefs["mode"]]
+    "vocab":   "Behave as VOCAB helper: IPA, brief meaning, and 2–3 short examples.",
+    "reading": "Provide a short reading (80–120 words) + comprehension questions.",
+    "grammar": "Explain a grammar point in 3–5 short bullets + examples.",
+    "quiz":    "Create a 5-question quiz (4 options each) with answers.",
+    "dialogue": (
+        "You are a friendly English conversation tutor for grades 6–9. "
+        "Engage in short, safe, simple dialogues (A2–B1). "
+        "Allowed topics: greetings, school, hobbies, weather, family, daily life. "
+        "Each reply should be 1–3 sentences. "
+        "If the student goes off-topic, politely redirect to learning. "
+        "Keep tone positive and age-appropriate."
+    ),
+}[prefs["mode"]]
+
 
     steer = (
         f"User language: {lang}\n"
@@ -295,11 +469,31 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     ]
 
     try:
-        text = await ask_openai(messages, max_tokens=500)
-        context.user_data["history"].append({"role": "assistant", "content": text})
-        await update.message.reply_text(trim(text))
-    except Exception as e:
-        await update.message.reply_text(f"Error: {str(e)}. Please try again.")
+    text = await ask_openai(messages, max_tokens=500)
+    context.user_data["history"].append({"role": "assistant", "content": text})
+    await update.message.reply_text(trim(text))
+
+    # === DIALOGUE TURN COUNTING ===
+    prefs = get_prefs(update.effective_user.id)
+    if prefs["mode"] == "dialogue":
+        prefs["dialogue_turns"] = prefs.get("dialogue_turns", 0) + 1
+        limit = prefs.get("dialogue_limit", DEFAULT_DIALOGUE_LIMIT)
+
+        if prefs["dialogue_turns"] >= limit:
+            lang = prefs.get("lang", "auto")
+            if lang == "ru":
+                msg = ("Отличная беседа! Хочешь немного потренироваться? "
+                       "Попробуй /vocab <слово> или /quiz по теме нашей беседы. "
+                       "Если хочешь продолжить — просто используй /talk <число> чтобы задать новый лимит.")
+            else:
+                msg = ("Great chat! Want to learn a bit more? "
+                       "Try /vocab <word> or /quiz about our topic. "
+                       "If you'd like to keep talking, use /talk <number> to set a new limit.")
+            await update.message.reply_text(msg)
+            prefs["dialogue_turns"] = 0
+
+except Exception as e:
+    await update.message.reply_text(f"Error: {str(e)}. Please try again.")
 
 # ========== FLASK (KEEP PORT OPEN FOR RENDER) ==========
 app = Flask(__name__)
@@ -326,6 +520,10 @@ def main():
     application.add_handler(CommandHandler("vocab", vocab_cmd))
     application.add_handler(CommandHandler("quiz", quiz_cmd))
     application.add_handler(CommandHandler("ping", ping_cmd))
+    application.add_handler(CommandHandler("talk", talk_cmd))
+    application.add_handler(CommandHandler("endtalk", endtalk_cmd))
+    application.add_handler(CommandHandler("settalk", settalk_cmd))
+
 
     # Free text
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
