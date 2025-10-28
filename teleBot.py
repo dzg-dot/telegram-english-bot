@@ -469,9 +469,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     ]
 
     try:
-    text = await ask_openai(messages, max_tokens=500)
-    context.user_data["history"].append({"role": "assistant", "content": text})
-    await update.message.reply_text(trim(text))
+        text = await ask_openai(messages, max_tokens=500)
+        context.user_data["history"].append({"role": "assistant", "content": text})
+        await update.message.reply_text(trim(text))
 
     # === DIALOGUE TURN COUNTING ===
     prefs = get_prefs(update.effective_user.id)
