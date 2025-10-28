@@ -261,8 +261,7 @@ async def vocab_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     ]
 
     try:
-        text = await ask_openai(messages, max_tokens=350)
-        await update.message.reply_text(trim(text))
+        text = await ask_openai(messages, max_tokens=350)      
     except Exception as e:
         await update.message.reply_text(f"⚠️ Vocab error: {e}")
 
@@ -374,70 +373,80 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"Language for 'question' and 'options': "
             f"{'Russian' if lang=='ru' else 'English'} at A2–B1 simplicity.\n"
             "Keep content school-safe."
-    )
+        )
 
-    messages = [
-        {"role": "system", "content": POLICY},
-        {"role": "user", "content": prompt_user},
-    ]
+        messages = [
+            {"role": "system", "content": POLICY},
+            {"role": "user", "content": prompt_user},
+        ]
 
-    raw = await ask_openai(messages, max_tokens=800)
-       
-       
-    # === Parse JSON safely ===
-    import json
-    def extract_json(s: str):
-        s = s.strip()
-        if "```" in s:
-            parts = s.split("```")
-            for i in range(len(parts)-1):
-                block = parts[i+1]
-                if block.lstrip().startswith("json"):
-                    return json.loads(block.split("\n", 1)[1])
-                try:
-                    return json.loads(block)
-                except Exception:
-                    continue
-        return json.loads(s)
+        raw = await ask_openai(messages, max_tokens=800)
 
-    try:
-        data = extract_json(raw)
-    except Exception:
-        return await update.message.reply_text("Sorry, the quiz format failed. Please try again.")
+        # === Parse JSON safely ===
+        import json, re
 
-    # ✅ Lưu đáp án và giải thích, KHÔNG gửi cho học sinh
-    key = []
-    for q in data.get("questions", []):
-        key.append({
-            "id": q.get("id"),
-            "correct": q.get("correct"),
-            "explain_en": q.get("explain_en"),
-            "explain_ru": q.get("explain_ru"),
-        })
-    context.user_data["last_quiz"] = {
+        def extract_json(s: str):
+            s = s.strip()
+            if "```" in s:
+                parts = s.split("```")
+                for i in range(len(parts)-1):
+                    block = parts[i+1]
+                    if block.lstrip().startswith("json"):
+                        return json.loads(block.split("\n", 1)[1])
+                    try:
+                        return json.loads(block)
+                    except Exception:
+                        continue
+            return json.loads(s)
+
+        try:
+            data = extract_json(raw)
+        except Exception:
+            return await update.message.reply_text("Sorry, the quiz format failed. Please try again.")
+
+        # ✅ Lưu đáp án và giải thích, KHÔNG gửi cho học sinh
+        key = []
+        for q in data.get("questions", []):
+            key.append({
+                "id": q.get("id"),
+                "correct": q.get("correct"),
+                "explain_en": q.get("explain_en"),
+                "explain_ru": q.get("explain_ru"),
+            })
+        context.user_data["last_quiz"] = {
             "topic": topic,
             "level": level,
             "key": key
-    }
+        }
 
-    # ✅ Ẩn answer key: xoá trường correct/explain trước khi hiển thị
-    for q in data.get("questions", []):
-        q.pop("correct", None)
-        q.pop("explain_en", None)            
-        q.pop("explain_ru", None)
+        # ✅ Ẩn answer key: xoá trường correct/explain trước khi hiển thị
+        for q in data.get("questions", []):
+            q.pop("correct", None)
+            q.pop("explain_en", None)
+            q.pop("explain_ru", None)
 
-    # ✅ Gửi cho học sinh: chỉ câu hỏi + 4 lựa chọn
-    blocks = []
-    for q in data.get("questions", []):
-        opts = q.get("options", ["", "", "", ""])
-        blocks.append(
-            f"Q{q.get('id')}. {q.get('question')}\n"
-            f"A) {opts[0]}\nB) {opts[1]}\nC) {opts[2]}\nD) {opts[3]}"
-        )
+        # 💡 Thêm lớp lọc rò rỉ (Answer: A, Correct option...) trong câu hỏi
+        answer_leak_re = re.compile(r"\(?\b(answer|correct|key)\b[:\-]?\s*[A-D].*?\)?", re.I)
+        def scrub(s: str) -> str:
+            return answer_leak_re.sub("", s or "").strip()
 
-    tip = "💡 When you're ready, type 'give me answer' (or 'дай ответ') to see the key."
-    await update.message.reply_text("\n\n".join(blocks) + "\n\n" + tip)
-    return
+        for q in data.get("questions", []):
+            q["question"] = scrub(q.get("question"))
+            q["options"] = [scrub(x) for x in q.get("options", ["", "", "", ""])]
+
+        # ✅ Gửi cho học sinh: chỉ câu hỏi + 4 lựa chọn
+        blocks = []
+        for q in data.get("questions", []):
+            opts = q.get("options", ["", "", "", ""])
+            blocks.append(
+                f"Q{q.get('id')}. {q.get('question')}\n"
+                f"A) {opts[0]}\nB) {opts[1]}\nC) {opts[2]}\nD) {opts[3]}"
+            )
+
+        # 💡 Cập nhật tip khớp với hàm is_answer_request()
+        tip = "💡 When you're ready, type 'give me answers' (or 'дай ответы') to see the key."
+        await update.message.reply_text("\n\n".join(blocks) + "\n\n" + tip)
+        return
 
     # (phần còn lại) các mode khác: vocab/reading/grammar/dialogue…
     # xây mode_instruction, history, messages, gọi ask_openai như cũ    
