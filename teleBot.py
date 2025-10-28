@@ -121,7 +121,7 @@ def trim(s: str, max_chars: int = 900) -> str:
     return s if len(s) <= max_chars else (s[:max_chars].rstrip() + "…")
 
 EN_ASK_ANS = re.compile(r"\b(give me answer|show answer|answer please)\b", re.I)
-RU_ASK_ANS = re.compile(r"(дай\s+ответ|покажи\s+ответ)", re.I)
+RU_ASK_ANS = re.compile(r"\b(дай\s+ответ|покажи\s+ответ|ответ\s+пожалуйста)\b", re.I)
 
 def is_answer_request(text: str) -> bool:
     t = (text or "").strip()
@@ -173,7 +173,7 @@ async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/mode vocab|reading|grammar|quiz – choose study mode\n"
         "/lang auto|en|ru – response language (auto = detect)\n"
         "/vocab <word> – IPA, POS, definition in EN (RU), 2–3 short examples\n"
-        "/quiz [topic] [A2|B1] – 5 MCQs with answer key\n"
+        "/quiz – turn on quiz mode, then send a topic. Answers are hidden; type 'give me answer' to see the key.\n"
         "/clear_history – clear chat context"
         "/mode quiz – ask questions only; say “give me answer” to see key\n"
         "/talk [number] – start dialogue mode for [number] turns (default 10)\n"
@@ -267,10 +267,12 @@ async def vocab_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def quiz_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     prefs = get_prefs(update.effective_user.id)
-    topic = context.args[0] if len(context.args) >= 1 else "school life"
-    level = context.args[1] if len(context.args) >= 2 else prefs["cefr"]
-    if blocked(topic):
-        return await update.message.reply_text("⛔ Off-topic. Please ask study-related content.")
+    prefs["mode"] = "quiz"
+    prefs["dialogue_turns"] = 0  # reset nếu cần
+    await update.message.reply_text(
+        "Quiz mode is ON. Send me a topic (e.g., pollution).\n"
+        "I’ll show only questions. When ready, type: give me answer."
+    )
 
     lang = prefs["lang"]
     if lang == "auto":
@@ -444,7 +446,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
 
         # 💡 Cập nhật tip khớp với hàm is_answer_request()
-        tip = "💡 When you're ready, type 'give me answers' (or 'дай ответы') to see the key."
+        tip = "💡 When you're ready, type 'give me answer' (or 'дай ответ') to see the key."
         await update.message.reply_text("\n\n".join(blocks) + "\n\n" + tip)
         return
 
