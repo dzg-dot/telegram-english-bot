@@ -1,9 +1,10 @@
 import os
 import re
-import time
 import json
+import time
 import logging
 import threading
+import hashlib, uuid, datetime, asyncio  # <-- added
 
 import httpx
 from dotenv import load_dotenv
@@ -18,22 +19,23 @@ from telegram.ext import (
     ContextTypes, filters
 )
 
-# ---------------- LOGGING ----------------
+# ========== LOGGING ==========
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s | %(levelname)s | %(name)s | %(message)s"
 )
 logger = logging.getLogger(__name__)
 
-# --------------- STARTUP HOOKS ---------------
+# ========== STARTUP HOOKS ==========
 async def on_error(update: object, context: ContextTypes.DEFAULT_TYPE):
     logger.exception("Exception while handling an update:", exc_info=context.error)
 
 async def on_startup(app: Application):
+    # Xóa webhook để dùng long-polling
     await app.bot.delete_webhook(drop_pending_updates=True)
     logger.info("Webhook deleted, switching to long-polling.")
 
-# --------------- ENV & CLIENTS ---------------
+# ========== ENV & CLIENTS ==========
 load_dotenv()
 
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
@@ -43,6 +45,10 @@ if not TELEGRAM_TOKEN:
 USE_OPENROUTER = os.getenv("USE_OPENROUTER", "True").lower() == "true"
 OR_KEY = os.getenv("OPENROUTER_API_KEY")
 OA_KEY = os.getenv("OPENAI_API_KEY")
+
+# --- analytics env (added) ---
+GSHEET_WEBHOOK = os.getenv("GSHEET_WEBHOOK", "").strip()
+LOG_SALT = os.getenv("LOG_SALT", "dev_salt")
 
 logger.info("DEBUG => USE_OPENROUTER=%s | OR_KEY? %s | OA_KEY? %s",
             USE_OPENROUTER, bool(OR_KEY), bool(OA_KEY))
@@ -71,10 +77,11 @@ else:
     client = OpenAI(api_key=OA_KEY, http_client=httpx_client)
     MODEL_NAME = "gpt-3.5-turbo"
 
-# --------------- CLASSROOM DEFAULTS ---------------
+# ========== CONSTANTS & HELPERS ==========
 DEFAULT_LANG = "auto"   # auto|en|ru
 MAX_HISTORY = 10
-ALLOWED_MODES = {"vocab", "reading", "grammar", "quiz", "dialogue"}
+
+ALLOWED_MODES = {"chat", "vocab", "reading", "grammar", "practice", "talk"}
 
 BANNED_KEYWORDS = [
     r"\bsex\b", r"\bporn\b", r"\berotic\b",
@@ -83,34 +90,29 @@ BANNED_KEYWORDS = [
     r"\bextremis(m|t)\b"
 ]
 
-DEFAULT_DIALOGUE_LIMIT = 10
 GRADE_TO_CEFR = {"6": "A2", "7": "A2+", "8": "B1-", "9": "B1"}
+DEFAULT_DIALOGUE_LIMIT = 10  # talk mode turn limit
 
-POLICY = (
-    "You are a safe classroom teaching assistant for English learning (grades 6–9, ages 12–15). "
-    "Do not use markdown bold or headings. "
-    "Answer in English by default; if the user writes in Russian, respond in Russian. "
-    "Allowed scope: vocabulary, reading, grammar, short quizzes; school-safe topics only. "
-    "Target level: CEFR A2–B1. Keep explanations simple and concise (<=150 words). "
-    "If a request is off-topic or unsafe, refuse briefly and redirect to learning tasks."
+POLICY_CHAT = (
+    "You are a safe, school-appropriate assistant for grades 6–9. "
+    "No markdown bold or headings. English by default; if the user writes Russian, respond in Russian. "
+    "Be friendly, concise, and helpful. If a request is unsafe/off-topic (adult/violent/etc.), refuse and steer to study topics. "
+    "Level A2–B1."
 )
 
-user_prefs = {}
+POLICY_STUDY = (
+    "You are an English study assistant for grades 6–9 (CEFR A2–B1). "
+    "No markdown bold or headings. Keep answers short, safe, and age-appropriate."
+)
+
 CYRILLIC_RE = re.compile(r"[А-Яа-яЁё]")
 
 def detect_lang(text: str) -> str:
     return "ru" if CYRILLIC_RE.search(text or "") else "en"
 
-def get_prefs(user_id: int):
-    if user_id not in user_prefs:
-        user_prefs[user_id] = {
-            "mode": "vocab",
-            "lang": DEFAULT_LANG,
-            "grade": "7",
-            "cefr": GRADE_TO_CEFR["7"],
-            "dialogue_limit": DEFAULT_DIALOGUE_LIMIT,
-        }
-    return user_prefs[user_id]
+def trim(s: str, max_chars: int = 1000) -> str:
+    s = re.sub(r"\n{3,}", "\n\n", (s or "").strip())
+    return s if len(s) <= max_chars else (s[:max_chars].rstrip() + "…")
 
 def blocked(text: str) -> bool:
     for pat in BANNED_KEYWORDS:
@@ -118,60 +120,160 @@ def blocked(text: str) -> bool:
             return True
     return False
 
-def trim(s: str, max_chars: int = 900) -> str:
-    s = re.sub(r"\n{3,}", "\n\n", (s or "").strip())
-    return s if len(s) <= max_chars else (s[:max_chars].rstrip() + "…")
-
-async def ask_openai(messages, max_tokens=500):
+async def ask_openai(messages, max_tokens=500, temperature=0.3, model=None):
+    model = model or MODEL_NAME
     for attempt in range(3):
         try:
             resp = client.chat.completions.create(
-                model=MODEL_NAME, messages=messages,
-                max_tokens=max_tokens, temperature=0.3
+                model=model, messages=messages,
+                max_tokens=max_tokens, temperature=temperature
             )
             return resp.choices[0].message.content
         except Exception as e1:
             if attempt < 2:
                 time.sleep(2 ** attempt)
                 continue
+            # fallback
             base_url = getattr(client, "base_url", "") or ""
             fb = "openai/gpt-3.5-turbo" if "openrouter.ai" in base_url else "gpt-3.5-turbo"
             try:
                 resp = client.chat.completions.create(
                     model=fb, messages=messages,
-                    max_tokens=max_tokens, temperature=0.3
+                    max_tokens=max_tokens, temperature=temperature
                 )
                 return resp.choices[0].message.content
             except Exception:
                 return f"[OpenAI error] {type(e1).__name__}: {e1}"
 
-# --------------- UI HELPERS ---------------
+def extract_json(s: str):
+    s = (s or "").strip()
+    if "```" in s:
+        parts = s.split("```")
+        for i in range(len(parts)-1):
+            block = parts[i+1]
+            if block.lstrip().startswith("json"):
+                try:
+                    return json.loads(block.split("\n", 1)[1])
+                except Exception:
+                    pass
+            try:
+                return json.loads(block)
+            except Exception:
+                continue
+    return json.loads(s)
+
+# ========== ANALYTICS HELPERS (added) ==========
+def _anon_user_hash(user_id: int) -> str:
+    raw = f"{user_id}:{LOG_SALT}".encode("utf-8")
+    return hashlib.sha256(raw).hexdigest()[:16]
+
+def _get_or_create_session(context: ContextTypes.DEFAULT_TYPE) -> tuple[str, int]:
+    ud = context.user_data
+    now = time.time()
+    if "session_id" not in ud:
+        ud["session_id"] = str(uuid.uuid4())
+    if "last_ts" not in ud:
+        ud["last_ts"] = now
+        delta_ms = 0
+    else:
+        delta_ms = int((now - ud["last_ts"]) * 1000)
+        ud["last_ts"] = now
+    return ud["session_id"], delta_ms
+
+async def log_event(update_or_query, context: ContextTypes.DEFAULT_TYPE,
+                    action: str, extra: dict | None = None):
+    if not GSHEET_WEBHOOK:
+        return
+    # Support both Update and CallbackQuery contexts
+    uid = 0
+    if isinstance(update_or_query, Update):
+        uid = update_or_query.effective_user.id if update_or_query.effective_user else 0
+    else:
+        try:
+            uid = update_or_query.from_user.id  # CallbackQuery
+        except Exception:
+            uid = 0
+
+    user_hash = _anon_user_hash(uid)
+    session_id, delta_ms = _get_or_create_session(context)
+
+    try:
+        prefs = get_prefs(uid)
+        mode = prefs.get("mode", "unknown")
+        grade = prefs.get("grade", "?")
+        cefr = prefs.get("cefr", "?")
+        ui_lang = prefs.get("lang", "auto")
+    except Exception:
+        mode = "unknown"; grade = "?"; cefr = "?"; ui_lang = "auto"
+
+    payload = {
+        "ts": datetime.datetime.utcnow().isoformat(timespec="seconds") + "Z",
+        "user_hash": user_hash,
+        "action": action,
+        "mode": mode,
+        "grade": grade,
+        "cefr": cefr,
+        "ui_lang": ui_lang,
+        "session_id": session_id,
+        "delta_ms": delta_ms,
+    }
+    if extra:
+        payload.update(extra)
+
+    async def _send():
+        try:
+            httpx_client.post(GSHEET_WEBHOOK, json=payload, timeout=10)
+        except Exception:
+            pass
+
+    await asyncio.to_thread(_send)
+
+# ========== USER PREFS / STATE ==========
+user_prefs = {}  # per-user persistent (in RAM)
+# context.user_data: per-chat session state (practice state, history...)
+
+def get_prefs(user_id: int):
+    if user_id not in user_prefs:
+        user_prefs[user_id] = {
+            "mode": "chat",
+            "lang": DEFAULT_LANG,
+            "grade": "7",
+            "cefr": GRADE_TO_CEFR["7"],
+            "dialogue_limit": DEFAULT_DIALOGUE_LIMIT,
+        }
+    return user_prefs[user_id]
+
+# ========== UI (INLINE MENUS) ==========
 def root_menu(lang: str) -> InlineKeyboardMarkup:
     if lang == "ru":
-        txt = [["Режим", "menu:mode"], ["Язык", "menu:lang"]],
-    kb = [
-        [InlineKeyboardButton("Mode", callback_data="menu:mode"),
-         InlineKeyboardButton("Language", callback_data="menu:lang")],
-        [InlineKeyboardButton("Grade", callback_data="menu:grade"),
-         InlineKeyboardButton("Help", callback_data="menu:help")],
-    ]
-    return InlineKeyboardMarkup(kb)
-
-def mode_menu() -> InlineKeyboardMarkup:
-    kb = [
-        [InlineKeyboardButton("Vocab",   callback_data="set_mode:vocab"),
-         InlineKeyboardButton("Reading", callback_data="set_mode:reading")],
-        [InlineKeyboardButton("Grammar", callback_data="set_mode:grammar"),
-         InlineKeyboardButton("Quiz",    callback_data="set_mode:quiz")],
-        [InlineKeyboardButton("Back", callback_data="menu:root")]
-    ]
+        kb = [
+            [InlineKeyboardButton("📚 Слова", callback_data="menu:mode:vocab"),
+             InlineKeyboardButton("📖 Чтение", callback_data="menu:mode:reading")],
+            [InlineKeyboardButton("⚙️ Грамматика", callback_data="menu:mode:grammar"),
+             InlineKeyboardButton("📝 Практика", callback_data="menu:mode:practice")],
+            [InlineKeyboardButton("💬 Разговор", callback_data="menu:mode:talk")],
+            [InlineKeyboardButton("🏫 Класс", callback_data="menu:grade"),
+             InlineKeyboardButton("🌐 Язык", callback_data="menu:lang")],
+            [InlineKeyboardButton("📋 Меню", callback_data="menu:root")]  # self to refresh
+        ]
+    else:
+        kb = [
+            [InlineKeyboardButton("📚 Vocabulary", callback_data="menu:mode:vocab"),
+             InlineKeyboardButton("📖 Reading", callback_data="menu:mode:reading")],
+            [InlineKeyboardButton("⚙️ Grammar", callback_data="menu:mode:grammar"),
+             InlineKeyboardButton("📝 Practice", callback_data="menu:mode:practice")],
+            [InlineKeyboardButton("💬 Talk", callback_data="menu:mode:talk")],
+            [InlineKeyboardButton("🏫 Grade", callback_data="menu:grade"),
+             InlineKeyboardButton("🌐 Language", callback_data="menu:lang")],
+            [InlineKeyboardButton("📋 Back to Menu", callback_data="menu:root")]
+        ]
     return InlineKeyboardMarkup(kb)
 
 def lang_menu() -> InlineKeyboardMarkup:
     kb = [
         [InlineKeyboardButton("English", callback_data="set_lang:en"),
          InlineKeyboardButton("Русский", callback_data="set_lang:ru")],
-        [InlineKeyboardButton("Back", callback_data="menu:root")]
+        [InlineKeyboardButton("⬅️ Back", callback_data="menu:root")]
     ]
     return InlineKeyboardMarkup(kb)
 
@@ -181,59 +283,84 @@ def grade_menu() -> InlineKeyboardMarkup:
          InlineKeyboardButton("7", callback_data="set_grade:7"),
          InlineKeyboardButton("8", callback_data="set_grade:8"),
          InlineKeyboardButton("9", callback_data="set_grade:9")],
-        [InlineKeyboardButton("Back", callback_data="menu:root")]
+        [InlineKeyboardButton("⬅️ Back", callback_data="menu:root")]
     ]
     return InlineKeyboardMarkup(kb)
 
-# --------------- START / HELP ---------------
+def practice_menu(lang="en") -> InlineKeyboardMarkup:
+    if lang == "ru":
+        labels = ["Multiple Choice", "Verb Forms", "Gap Fill",
+                  "Word Formation", "Error Correction", "Sentence Ordering"]
+        labels_ru = ["Тест (A–D)", "Формы глагола", "Пропуски",
+                     "Словообразование", "Исправь ошибку", "Порядок слов"]
+        text = labels_ru
+    else:
+        text = ["Multiple Choice", "Verb Forms", "Gap Fill",
+                "Word Formation", "Error Correction", "Sentence Ordering"]
+    kb = [
+        [InlineKeyboardButton(f"🅰 {text[0]}", callback_data="practice:type:mcq"),
+         InlineKeyboardButton(f"🔤 {text[1]}", callback_data="practice:type:verb")],
+        [InlineKeyboardButton(f"🕳 {text[2]}", callback_data="practice:type:gap"),
+         InlineKeyboardButton(f"🧱 {text[3]}", callback_data="practice:type:wordform")],
+        [InlineKeyboardButton(f"❌ {text[4]}", callback_data="practice:type:error"),
+         InlineKeyboardButton(f"🔁 {text[5]}", callback_data="practice:type:order")],
+        [InlineKeyboardButton("⬅️ Back", callback_data="menu:root")]
+    ]
+    return InlineKeyboardMarkup(kb)
+
+def talk_topics_menu(lang="en") -> InlineKeyboardMarkup:
+    if lang == "ru":
+        lbl = ["Быт", "Школа", "Хобби", "Окружающая среда", "Праздники", "Семья"]
+    else:
+        lbl = ["Daily life", "School life", "Hobbies", "Environment", "Holidays", "Family"]
+    kb = [
+        [InlineKeyboardButton(lbl[0], callback_data="talk:topic:daily"),
+         InlineKeyboardButton(lbl[1], callback_data="talk:topic:school")],
+        [InlineKeyboardButton(lbl[2], callback_data="talk:topic:hobbies"),
+         InlineKeyboardButton(lbl[3], callback_data="talk:topic:env")],
+        [InlineKeyboardButton(lbl[4], callback_data="talk:topic:holidays"),
+         InlineKeyboardButton(lbl[5], callback_data="talk:topic:family")],
+        [InlineKeyboardButton("⬅️ Back", callback_data="menu:root")]
+    ]
+    return InlineKeyboardMarkup(kb)
+
+def mcq_buttons(options):
+    # Mỗi nút chứa cả chữ cái và nội dung — bấm trực tiếp
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton(f"A) {options[0]}", callback_data="ans:A"),
+         InlineKeyboardButton(f"B) {options[1]}", callback_data="ans:B")],
+        [InlineKeyboardButton(f"C) {options[2]}", callback_data="ans:C"),
+         InlineKeyboardButton(f"D) {options[3]}", callback_data="ans:D")]
+    ])
+
+# ========== START / HELP ==========
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # greeting
-    txt = "Hi! How can I help you today?"
-    # default EN; if user typed RU, greet in RU
-    if detect_lang(update.message.text or "") == "ru":
-        txt = "Привет! Чем я могу помочь сегодня?"
-    await update.message.reply_text(txt, reply_markup=root_menu("en"))
+    # Lời chào tự nhiên
+    text_in = (update.message.text or "").strip()
+    greet = "Hi there! I’m your English study buddy. How can I help you today?"
+    if detect_lang(text_in) == "ru":
+        greet = "Привет! Я твой помощник по английскому. Чем помочь сегодня?"
+    # reset to chat mode
+    prefs = get_prefs(update.effective_user.id)
+    prefs["mode"] = "chat"
+    await update.message.reply_text(greet, reply_markup=root_menu(prefs.get("lang", "en")))
+    # log
+    await log_event(update, context, "start")
 
 async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     prefs = get_prefs(update.effective_user.id)
     lang = prefs.get("lang", "en")
-    text = (
-        "Commands:\n"
-        "/start – open menu\n"
-        "/help – show menu and tips\n"
-        "/grade 6|7|8|9 – set grade\n"
-        "/mode vocab|reading|grammar|quiz – choose study mode\n"
-        "/lang auto|en|ru – response language\n\n"
-        "Tip: after you choose a mode, just type content.\n"
-        "In Vocab: send a word. In Quiz: send a topic."
-    )
-    if lang == "ru":
-        text = (
-            "Команды:\n"
-            "/start – открыть меню\n"
-            "/help – меню и подсказки\n"
-            "/grade 6|7|8|9 – выбрать класс\n"
-            "/mode vocab|reading|grammar|quiz – режим\n"
-            "/lang auto|en|ru – язык ответа\n\n"
-            "Подсказка: после выбора режима просто пишите сообщение.\n"
-            "Vocab: слово. Quiz: тема."
-        )
-    await update.message.reply_text(text, reply_markup=root_menu(lang))
+    msg = "Choose from the menu below." if lang != "ru" else "Выберите пункт меню ниже."
+    await update.message.reply_text(msg, reply_markup=root_menu(lang))
+    await log_event(update, context, "help")
 
-# --------------- VOCAB ---------------
-async def vocab_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # giữ command cho ai thích, nhưng không bắt buộc
-    prefs = get_prefs(update.effective_user.id)
-    prefs["mode"] = "vocab"
-    await update.message.reply_text("Vocab mode is ON. Send me a word.")
-
+# ========== VOCAB ==========
 async def build_vocab_card(headword: str, prefs: dict, user_text: str) -> str:
-    # show EN def + short RU in parentheses; POS + IPA; no bold
+    # Thẻ từ: Word /IPA/, POS, Definition EN (RU), Examples EN (+ RU nếu giao diện RU)
     lang_for_examples = prefs.get("lang", "auto")
     if lang_for_examples == "auto":
         lang_for_examples = detect_lang(user_text or "")
     include_ru_examples = (lang_for_examples == "ru")
-
     prompt = (
         "You are an English-learning assistant for grades 6–9 (CEFR A2–B1). "
         "Make a compact vocabulary card. Do not use markdown bold. "
@@ -249,139 +376,231 @@ async def build_vocab_card(headword: str, prefs: dict, user_text: str) -> str:
         f"3) <short English example>{' (optional Russian translation)' if include_ru_examples else ' (optional)'}\n"
         "Keep under 120 words."
     )
-    msgs = [{"role": "system", "content": POLICY},
+    msgs = [{"role": "system", "content": POLICY_STUDY},
             {"role": "user", "content": prompt}]
     return await ask_openai(msgs, max_tokens=320)
 
-# --------------- QUIZ STATE ---------------
-# context.user_data["quiz"] = {
-#   "topic": str, "level": str, "questions": [ {id, q, options[A..D], correct, explain_en, explain_ru}... ],
-#   "idx": 0, "attempts": 0
-# }
-def quiz_buttons(options):
-    # Each button text includes the option letter and text.
-    letters = ["A", "B", "C", "D"]
-    row1 = [
-        InlineKeyboardButton(f"A) {options[0]}", callback_data="qa:A"),
-        InlineKeyboardButton(f"B) {options[1]}", callback_data="qa:B"),
-    ]
-    row2 = [
-        InlineKeyboardButton(f"C) {options[2]}", callback_data="qa:C"),
-        InlineKeyboardButton(f"D) {options[3]}", callback_data="qa:D"),
-    ]
-    return InlineKeyboardMarkup([row1, row2])
+# ========== PRACTICE (GENERIC) ==========
+"""
+practice_state schema in context.user_data["practice"]:
+{
+  "type": "mcq|verb|gap|wordform|error|order",
+  "topic": str,
+  "items": [ ... 5 items ... ],
+  "idx": 0,
+  "attempts": 0,
+  "score": 0,
+  "ui_lang": "en|ru"
+}
+For MCQ item:
+  {"id":1,"question":"...","options":["...","...","...","..."],"answer":"A",
+   "explain_en":"...","explain_ru":"..."}
+For text-based item (verb/gap/wordform/error/order):
+  {"id":1,"prompt":"...", "answer":"...", "explain_en":"...", "explain_ru":"..."}
+"""
 
-async def send_quiz_question(update_or_query, context: ContextTypes.DEFAULT_TYPE):
-    """Send current question (by index) with buttons."""
-    data = context.user_data.get("quiz")
-    if not data:
-        return
-    i = data["idx"]
-    q = data["questions"][i]
-    title = f"Topic: {data['topic'].title()} | Q{i+1}/{len(data['questions'])}"
-    text = f"{title}\n\n{q['question']}"
-    buttons = quiz_buttons(q["options"])
-    if isinstance(update_or_query, Update):
-        await update_or_query.message.reply_text(text, reply_markup=buttons)
-    else:
-        # CallbackQuery
-        await update_or_query.edit_message_text(text, reply_markup=buttons)
+def normalize_answer(s: str) -> str:
+    s = (s or "").strip().lower()
+    s = re.sub(r"[^\w\s'-]", "", s)
+    s = re.sub(r"\s+", " ", s)
+    return s
 
-async def build_quiz(topic: str, prefs: dict, user_text: str, lang_detected: str):
-    level = prefs["cefr"]
-    ui_lang = prefs.get("lang", "auto")
-    if ui_lang == "auto":
-        ui_lang = lang_detected
-
+async def build_mcq(topic: str, ui_lang: str, level: str):
     prompt = (
-        f"Create a 5-question MCQ quiz on '{topic}', level {level}, grades 6–9. "
-        "Return STRICT JSON only (no prose, no markdown):\n"
+        f"Create a 5-question multiple-choice quiz (4 options A–D) on '{topic}', level {level}, grades 6–9.\n"
+        "Return STRICT JSON only:\n"
         "{ \"questions\": [\n"
         "{\"id\":1,\"question\":\"...\",\"options\":[\"...\",\"...\",\"...\",\"...\"],"
-        "\"correct\":\"A\",\"explain_en\":\"<=25 words\",\"explain_ru\":\"<=25 words\"},\n"
+        "\"answer\":\"A\",\"explain_en\":\"<=25 words\",\"explain_ru\":\"<=25 words\"},\n"
         "{\"id\":2,...},{\"id\":3,...},{\"id\":4,...},{\"id\":5,...}\n"
         "]}\n"
-        f"Language for 'question' and 'options': {'Russian' if ui_lang=='ru' else 'English'} "
-        "at A2–B1 simplicity. Keep school-safe. Do not include answer hints in text."
+        f"Language for 'question' and 'options': {'Russian' if ui_lang=='ru' else 'English'} (A2–B1). "
+        "School-safe. Do not leak answer hints in text."
     )
-    msgs = [{"role": "system", "content": POLICY},
+    msgs = [{"role": "system", "content": POLICY_STUDY},
             {"role": "user", "content": prompt}]
     raw = await ask_openai(msgs, max_tokens=800)
-
-    def extract_json(s: str):
-        s = s.strip()
-        if "```" in s:
-            parts = s.split("```")
-            for i in range(len(parts)-1):
-                block = parts[i+1]
-                if block.lstrip().startswith("json"):
-                    return json.loads(block.split("\n", 1)[1])
-                try:
-                    return json.loads(block)
-                except Exception:
-                    continue
-        return json.loads(s)
-
     data = extract_json(raw)
-    qs = []
+    items = []
     for q in data.get("questions", []):
-        qs.append({
+        items.append({
             "id": q.get("id"),
             "question": q.get("question"),
             "options": q.get("options", ["", "", "", ""]),
-            "correct": q.get("correct", "A"),
+            "answer": q.get("answer", "A"),
             "explain_en": q.get("explain_en", ""),
             "explain_ru": q.get("explain_ru", "")
         })
-    return qs
+    return items
 
-# --------------- COMMANDS ---------------
-async def quiz_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def build_text_items(ptype: str, topic: str, ui_lang: str, level: str):
+    """
+    ptype in {"verb","gap","wordform","error","order"}
+    Returns 5 items with fields:
+    - prompt (string to show)
+    - answer (expected short text)
+    - explain_en / explain_ru
+    """
+    task_desc = {
+        "verb": "Conjugate the verb in brackets into the correct form.",
+        "gap": "Fill in the blank with one suitable word.",
+        "wordform": "Complete the sentence using the correct form of the word in parentheses.",
+        "error": "Find and correct the mistake in the sentence (write the corrected version).",
+        "order": "Reorder the words to make a correct sentence."
+    }[ptype]
+
+    prompt = (
+        f"Create 5 short {ptype} exercises on '{topic}', level {level}, grades 6–9. "
+        f"Task: {task_desc}\n"
+        "Return STRICT JSON only:\n"
+        "{ \"items\": [\n"
+        "{\"id\":1,\"prompt\":\"...\",\"answer\":\"...\",\"explain_en\":\"<=25 words\",\"explain_ru\":\"<=25 words\"},\n"
+        "{\"id\":2,...},{\"id\":3,...},{\"id\":4,...},{\"id\":5,...}\n"
+        "]}\n"
+        f"Language for 'prompt': {'Russian' if ui_lang=='ru' else 'English'} (A2–B1). "
+        "Keep answers short. School-safe."
+    )
+    msgs = [{"role": "system", "content": POLICY_STUDY},
+            {"role": "user", "content": prompt}]
+    raw = await ask_openai(msgs, max_tokens=900)
+    data = extract_json(raw)
+    items = []
+    for it in data.get("items", []):
+        items.append({
+            "id": it.get("id"),
+            "prompt": it.get("prompt"),
+            "answer": it.get("answer"),
+            "explain_en": it.get("explain_en", ""),
+            "explain_ru": it.get("explain_ru", "")
+        })
+    return items
+
+async def send_practice_item(update_or_query, context: ContextTypes.DEFAULT_TYPE):
+    st = context.user_data.get("practice")
+    if not st:
+        return
+    lang = st.get("ui_lang", "en")
+    ptype = st["type"]
+    idx = st["idx"]
+    total = len(st["items"])
+    title = f"Q{idx+1}/{total}"
+    if ptype == "mcq":
+        q = st["items"][idx]
+        text = f"{title}\n\n{q['question']}"
+        kb = mcq_buttons(q["options"])
+        if isinstance(update_or_query, Update):
+            await update_or_query.message.reply_text(text, reply_markup=kb)
+        else:
+            await update_or_query.edit_message_text(text, reply_markup=kb)
+        # log question shown
+        await log_event(update_or_query, context, "practice_q", {
+            "ptype": "mcq", "q_index": idx, "q_id": q.get("id")
+        })
+    else:
+        # text input type
+        q = st["items"][idx]
+        head = "Type your answer:" if lang != "ru" else "Напиши ответ:"
+        text = f"{title}\n\n{q['prompt']}\n\n{head}"
+        if isinstance(update_or_query, Update):
+            await update_or_query.message.reply_text(text)
+        else:
+            await update_or_query.edit_message_text(text)
+        await log_event(update_or_query, context, "practice_q", {
+            "ptype": ptype, "q_index": idx, "q_id": q.get("id")
+        })
+
+async def practice_summary(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    st = context.user_data.get("practice")
+    if not st: 
+        return
+    lang = st.get("ui_lang", "en")
+    total = len(st["items"])
+    score = st.get("score", 0)
+    lines = []
+    if lang == "ru":
+        lines.append(f"Итоги: {score}/{total}")
+        lines.append("Ответы и объяснения:")
+    else:
+        lines.append(f"Summary: {score}/{total}")
+        lines.append("Answers and explanations:")
+
+    # liệt kê lại câu hỏi & đáp án (và giải thích)
+    if st["type"] == "mcq":
+        for it in st["items"]:
+            expl = it["explain_ru"] if lang == "ru" and it["explain_ru"] else it["explain_en"]
+            lines.append(f"Q{it['id']}: {it['answer']} — {expl}")
+    else:
+        for it in st["items"]:
+            expl = it["explain_ru"] if lang == "ru" and it["explain_ru"] else it["explain_en"]
+            lines.append(f"Q{it['id']}: {it['answer']} — {expl}")
+
+    await update.message.reply_text("\n".join(lines))
+    await log_event(update, context, "practice_done", {
+        "ptype": st["type"], "score": score, "total": total, "topic": st.get("topic")
+    })
+    context.user_data.pop("practice", None)
+
+# ========== TALK (CONVERSATION COACH) ==========
+async def talk_reply(user_text: str, topic: str, ui_lang: str):
+    prompt = (
+        "You are a friendly English conversation coach for a middle-school student (A2–B1). "
+        f"Topic: {topic}. Respond in 1–3 sentences. "
+        "Encourage and, when helpful, suggest 1–2 useful words/phrases. "
+        "Correct small mistakes implicitly by reformulating. "
+        "If the student uses Russian, briefly translate key phrase and encourage continuing in English. "
+        "School-safe, positive tone. No markdown bold."
+    )
+    msgs = [
+        {"role": "system", "content": POLICY_STUDY},
+        {"role": "user", "content": f"Student says: {user_text}"}
+    ]
+    return await ask_openai([{"role": "system", "content": prompt}, *msgs], max_tokens=180)
+
+# ========== COMMANDS ==========
+async def vocab_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     prefs = get_prefs(update.effective_user.id)
-    prefs["mode"] = "quiz"
-    prefs["dialogue_turns"] = 0
-    await update.message.reply_text("Quiz mode is ON. Send me a topic (e.g., pollution).")
+    prefs["mode"] = "vocab"
+    await update.message.reply_text("Vocabulary mode is ON. Send me a word.")
+    await log_event(update, context, "set_mode", {"new_mode": "vocab"})
 
-# --------------- CALLBACKS ---------------
+# ========== CALLBACK HANDLER ==========
 async def on_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
     data = q.data or ""
-    await q.answer()  # stop the spinner fast
+    await q.answer()  # tắt quay vòng
+
     uid = update.effective_user.id
     prefs = get_prefs(uid)
+    ui_lang = prefs.get("lang", "en")
+    if ui_lang == "auto":
+        ui_lang = "ru" if CYRILLIC_RE.search(q.message.text or "") else "en"
 
-    # --- MENUS ---
+    # MENUS
     if data == "menu:root":
-        await q.edit_message_text("Hi! How can I help you today?", reply_markup=root_menu(prefs.get("lang","en")))
-        return
-
-    if data == "menu:mode":
-        await q.edit_message_text("Choose a mode:", reply_markup=mode_menu())
+        msg = "Back to menu." if ui_lang != "ru" else "Возврат в меню."
+        await q.edit_message_text(msg, reply_markup=root_menu(ui_lang))
+        prefs["mode"] = "chat"
+        await log_event(update, context, "menu_root")
         return
 
     if data == "menu:lang":
-        await q.edit_message_text("Choose language:", reply_markup=lang_menu())
+        await q.edit_message_text("Choose language:" if ui_lang != "ru" else "Выберите язык:",
+                                  reply_markup=lang_menu())
+        await log_event(update, context, "menu_lang")
         return
 
     if data == "menu:grade":
-        await q.edit_message_text("Choose grade:", reply_markup=grade_menu())
-        return
-
-    if data.startswith("set_mode:"):
-        mode = data.split(":", 1)[1]
-        prefs["mode"] = mode
-        txt = f"Mode set to {mode}."
-        if mode == "quiz":
-            txt += " Send me a topic."
-        elif mode == "vocab":
-            txt += " Send me a word."
-        await q.edit_message_text(txt, reply_markup=root_menu(prefs.get("lang","en")))
+        await q.edit_message_text("Choose grade:" if ui_lang != "ru" else "Выберите класс:",
+                                  reply_markup=grade_menu())
+        await log_event(update, context, "menu_grade")
         return
 
     if data.startswith("set_lang:"):
         lang = data.split(":", 1)[1]
         prefs["lang"] = lang
-        await q.edit_message_text(f"Language set to {lang.upper()}.", reply_markup=root_menu(lang))
+        await q.edit_message_text(f"Language set to {lang.upper()}." if lang!="ru" else "Язык: Русский.",
+                                  reply_markup=root_menu(lang))
+        await log_event(update, context, "set_lang", {"new_lang": lang})
         return
 
     if data.startswith("set_grade:"):
@@ -389,138 +608,312 @@ async def on_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if g in GRADE_TO_CEFR:
             prefs["grade"] = g
             prefs["cefr"] = GRADE_TO_CEFR[g]
-            await q.edit_message_text(f"Grade set to {g}. Target level: {prefs['cefr']}.",
-                                      reply_markup=root_menu(prefs.get("lang","en")))
+            txt = (f"Grade set to {g}. Target level: {prefs['cefr']}."
+                   if ui_lang != "ru" else f"Класс: {g}. Уровень: {prefs['cefr']}.")
+            await q.edit_message_text(txt, reply_markup=root_menu(ui_lang))
+            await log_event(update, context, "set_grade", {"grade": g, "cefr": prefs["cefr"]})
         else:
-            await q.edit_message_text("Invalid grade.", reply_markup=root_menu(prefs.get("lang","en")))
+            await q.edit_message_text("Invalid grade.", reply_markup=root_menu(ui_lang))
         return
 
-    # --- QUIZ ANSWER BUTTONS ---
-    if data.startswith("qa:"):
-        choice = data.split(":", 1)[1]  # A/B/C/D
-        pack = context.user_data.get("quiz")
-        if not pack:
-            await q.edit_message_text("No active quiz. Choose Quiz mode and send a topic.", reply_markup=root_menu(prefs.get("lang","en")))
-            return
-        i = pack["idx"]
-        question = pack["questions"][i]
-        correct = question["correct"]
-        ui_lang = prefs.get("lang", "auto")
-        if ui_lang == "auto":
-            ui_lang = "ru" if CYRILLIC_RE.search(q.message.text or "") else "en"
+    # MODE ENTRIES
+    if data.startswith("menu:mode:"):
+        mode = data.split(":")[-1]  # vocab/reading/grammar/practice/talk
+        prefs["mode"] = mode
+        await log_event(update, context, "set_mode", {"new_mode": mode})
+        if mode == "vocab":
+            txt = "Vocabulary mode is ON. Send a word." if ui_lang != "ru" else "Режим Слова. Отправь слово."
+            await q.edit_message_text(txt, reply_markup=root_menu(ui_lang))
+        elif mode == "reading":
+            txt = "Reading mode is ON. Send a topic for a short passage." if ui_lang != "ru" else "Режим Чтение. Отправь тему."
+            await q.edit_message_text(txt, reply_markup=root_menu(ui_lang))
+        elif mode == "grammar":
+            txt = "Grammar mode is ON. Send a grammar point (e.g., Present Simple)." if ui_lang != "ru" else "Режим Грамматика. Отправь тему (напр., Present Simple)."
+            await q.edit_message_text(txt, reply_markup=root_menu(ui_lang))
+        elif mode == "practice":
+            txt = "Choose an exercise type:" if ui_lang != "ru" else "Выберите тип упражнения:"
+            await q.edit_message_text(txt, reply_markup=practice_menu(ui_lang))
+        elif mode == "talk":
+            txt = "Choose a topic to talk about:" if ui_lang != "ru" else "Выберите тему для разговора:"
+            await q.edit_message_text(txt, reply_markup=talk_topics_menu(ui_lang))
+        return
 
-        if choice == correct:
-            # correct: show explanation and next
-            expl = question["explain_ru"] if ui_lang == "ru" and question["explain_ru"] else question["explain_en"]
-            ok = "Верно!" if ui_lang == "ru" else "Correct!"
-            msg = f"{ok}\n{expl}".strip()
-            await q.edit_message_text(msg)
-            # next
-            pack["idx"] += 1
-            pack["attempts"] = 0
-            if pack["idx"] >= len(pack["questions"]):
-                done = "Quiz finished. Great job!" if ui_lang != "ru" else "Тест завершен. Отличная работа!"
-                await q.message.reply_text(done)
-                context.user_data.pop("quiz", None)
-            else:
-                # small guiding hint for Q2 (open-ended nudge)
-                if pack["idx"] == 1:
-                    hint = "Tip: think about cause and effect." if ui_lang != "ru" else "Подсказка: подумай о причине и следствии."
-                    await q.message.reply_text(hint)
-                await send_quiz_question(q, context)
+    # PRACTICE TYPE SELECT
+    if data.startswith("practice:type:"):
+        ptype = data.split(":")[-1]  # mcq/verb/gap/wordform/error/order
+        # tạo state rỗng; sẽ bắt topic ở tin nhắn tự do kế tiếp
+        context.user_data["practice"] = {
+            "type": ptype,
+            "topic": None,
+            "items": [],
+            "idx": 0,
+            "attempts": 0,
+            "score": 0,
+            "ui_lang": ui_lang
+        }
+        ask = "Send me a topic (e.g., pollution)." if ui_lang != "ru" else "Отправь тему (например, pollution)."
+        await q.edit_message_text(ask)
+        await log_event(update, context, "practice_type", {"ptype": ptype})
+        return
+
+    # TALK TOPIC
+    if data.startswith("talk:topic:"):
+        topic_key = data.split(":")[-1]
+        mapping = {
+            "daily": "daily life", "school": "school life", "hobbies": "hobbies",
+            "env": "environment", "holidays": "holidays", "family": "family"
+        }
+        topic = mapping.get(topic_key, "daily life")
+        # đặt mode talk + state
+        prefs["mode"] = "talk"
+        context.user_data["talk"] = {"topic": topic, "turns": 0}
+        opener = "Let’s talk! How are you today?" if ui_lang != "ru" else "Поговорим! Как твоё настроение сегодня?"
+        await q.edit_message_text(f"Topic: {topic}\n\n{opener}", reply_markup=root_menu(ui_lang))
+        await log_event(update, context, "talk_topic", {"topic": topic})
+        return
+
+    # PRACTICE ANSWER (MCQ)
+    if data.startswith("ans:"):
+        st = context.user_data.get("practice")
+        if not st or st.get("type") != "mcq":
+            await q.edit_message_text("No active multiple-choice exercise.", reply_markup=root_menu(ui_lang))
             return
+        choice = data.split(":", 1)[1]
+        idx = st["idx"]
+        qitem = st["items"][idx]
+        correct = qitem["answer"]
+        if choice == correct:
+            st["score"] += 1
+            st["attempts"] = 0
+            expl = qitem["explain_ru"] if ui_lang == "ru" and qitem["explain_ru"] else qitem["explain_en"]
+            ok = "Correct!" if ui_lang != "ru" else "Верно!"
+            await q.edit_message_text(f"{ok}\n{expl}".strip())
+            await log_event(update, context, "practice_answer", {
+                "ptype": "mcq", "q_index": idx, "q_id": qitem.get("id"),
+                "choice": choice, "correct": True
+            })
+            st["idx"] += 1
         else:
-            # wrong
-            pack["attempts"] += 1
-            if pack["attempts"] < 2:
+            st["attempts"] += 1
+            await log_event(update, context, "practice_answer", {
+                "ptype": "mcq", "q_index": idx, "q_id": qitem.get("id"),
+                "choice": choice, "correct": False, "attempt": st["attempts"]
+            })
+            if st["attempts"] < 2:
                 msg = "Not quite. Try again." if ui_lang != "ru" else "Почти. Попробуй еще раз."
                 await q.edit_message_text(msg)
-                await send_quiz_question(q, context)
-                return
-            # second wrong -> reveal
-            expl = question["explain_ru"] if ui_lang == "ru" and question["explain_ru"] else question["explain_en"]
-            ans = f"The correct answer is {correct}." if ui_lang != "ru" else f"Правильный ответ: {correct}."
-            await q.edit_message_text(f"{ans}\n{expl}".strip())
-            pack["idx"] += 1
-            pack["attempts"] = 0
-            if pack["idx"] >= len(pack["questions"]):
-                done = "Quiz finished. Keep practicing!" if ui_lang != "ru" else "Тест завершен. Продолжай тренироваться!"
-                await q.message.reply_text(done)
-                context.user_data.pop("quiz", None)
             else:
-                await send_quiz_question(q, context)
-            return
+                st["attempts"] = 0
+                ans = f"The correct answer is {correct}." if ui_lang != "ru" else f"Правильный ответ: {correct}."
+                expl = qitem["explain_ru"] if ui_lang == "ru" and qitem["explain_ru"] else qitem["explain_en"]
+                await q.edit_message_text(f"{ans}\n{expl}".strip())
+                await log_event(update, context, "practice_reveal", {
+                    "ptype": "mcq", "q_index": idx, "q_id": qitem.get("id"),
+                    "correct_choice": correct
+                })
+                st["idx"] += 1
 
-# --------------- FREE TEXT HANDLER ---------------
+        # next or summary
+        if st["idx"] >= len(st["items"]):
+            # end
+            dummy_update = Update(update.update_id, message=q.message)  # to reuse summary
+            await practice_summary(dummy_update, context)
+        else:
+            await send_practice_item(q, context)
+        return
+
+# ========== FREE TEXT HANDLER ==========
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_message = update.message.text or ""
     if blocked(user_message):
         return await update.message.reply_text(
-            "⛔ That's outside our classroom scope. Try vocabulary, reading, grammar, or a quiz topic."
+            "⛔ That's outside our classroom scope. Please try vocabulary, reading, grammar, or a practice topic."
         )
 
-    prefs = get_prefs(update.effective_user.id)
-    lang = prefs["lang"]
+    uid = update.effective_user.id
+    prefs = get_prefs(uid)
+
+    # Detect UI language
+    lang = prefs.get("lang", "en")
     if lang == "auto":
         lang = detect_lang(user_message)
 
-    # Mode shortcuts
+    # log every incoming message
+    await log_event(update, context, "message", {"message_len": len(user_message)})
+
+    # PRACTICE FLOW: if user already chose a practice type but not yet built items, treat message as topic
+    st = context.user_data.get("practice")
+    if st and not st.get("items"):
+        topic = user_message.strip() or "school life"
+        st["topic"] = topic
+        level = prefs["cefr"]
+        try:
+            if st["type"] == "mcq":
+                st["items"] = await build_mcq(topic, lang, level)
+            else:
+                st["items"] = await build_text_items(st["type"], topic, lang, level)
+        except Exception:
+            msg = "Failed to build exercises. Please try another topic." if lang != "ru" else "Не удалось создать задания. Попробуй другую тему."
+            return await update.message.reply_text(msg)
+        if not st["items"]:
+            msg = "No items generated. Try another topic." if lang != "ru" else "Задания не созданы. Попробуй другую тему."
+            return await update.message.reply_text(msg)
+        st["idx"] = 0
+        st["attempts"] = 0
+        st["score"] = 0
+        st["ui_lang"] = lang
+        await log_event(update, context, "practice_build", {"ptype": st["type"], "topic": topic, "q_count": len(st["items"])})
+        return await send_practice_item(update, context)
+
+    # PRACTICE FLOW for text-input types: receive answers here
+    if st and st.get("items") and st["type"] != "mcq":
+        idx = st["idx"]
+        if idx < len(st["items"]):
+            qitem = st["items"][idx]
+            user_ans = normalize_answer(user_message)
+            gold = normalize_answer(qitem["answer"])
+            if user_ans == gold:
+                st["score"] += 1
+                st["attempts"] = 0
+                expl = qitem["explain_ru"] if st["ui_lang"] == "ru" and qitem["explain_ru"] else qitem["explain_en"]
+                ok = "Correct!" if st["ui_lang"] != "ru" else "Верно!"
+                await update.message.reply_text(f"{ok}\n{expl}".strip())
+                await log_event(update, context, "practice_answer", {
+                    "ptype": st["type"], "q_index": idx, "q_id": qitem.get("id"),
+                    "choice": user_message, "correct": True
+                })
+                st["idx"] += 1
+            else:
+                st["attempts"] += 1
+                await log_event(update, context, "practice_answer", {
+                    "ptype": st["type"], "q_index": idx, "q_id": qitem.get("id"),
+                    "choice": user_message, "correct": False, "attempt": st["attempts"]
+                })
+                if st["attempts"] < 2:
+                    again = "Not quite. Try again." if st["ui_lang"] != "ru" else "Почти. Попробуй еще раз."
+                    return await update.message.reply_text(again)
+                # reveal after 2 attempts
+                st["attempts"] = 0
+                ans = f"The correct answer is: {qitem['answer']}" if st["ui_lang"] != "ru" else f"Правильный ответ: {qitem['answer']}"
+                expl = qitem["explain_ru"] if st["ui_lang"] == "ru" and qitem["explain_ru"] else qitem["explain_en"]
+                await update.message.reply_text(f"{ans}\n{expl}".strip())
+                await log_event(update, context, "practice_reveal", {
+                    "ptype": st["type"], "q_index": idx, "q_id": qitem.get("id"),
+                    "correct_choice": qitem["answer"]
+                })
+                st["idx"] += 1
+
+            if st["idx"] >= len(st["items"]):
+                return await practice_summary(update, context)
+            else:
+                return await send_practice_item(update, context)
+
+    # VOCAB MODE
     if prefs["mode"] == "vocab":
         word = user_message.strip()
         if not word:
-            return await update.message.reply_text("Send a word to look up.")
-        await update.message.reply_text("Thinking…")
-        card = await build_vocab_card(word, prefs, update.message.text)
-        return await update.message.reply_text(trim(card))
-
-    if prefs["mode"] == "quiz":
-        # Treat free text as topic to build a new quiz
-        topic = user_message.strip() or "school life"
-        await update.message.reply_text("Thinking…")
+            return await update.message.reply_text("Send a word to look up." if lang != "ru" else "Отправь слово.")
         try:
-            qs = await build_quiz(topic, prefs, update.message.text, lang)
+            card = await build_vocab_card(word, prefs, update.message.text)
+            await log_event(update, context, "vocab_lookup", {"word_len": len(word)})
+            return await update.message.reply_text(trim(card))
         except Exception:
-            return await update.message.reply_text("Sorry, quiz building failed. Please try again.")
-        if not qs:
-            return await update.message.reply_text("Couldn't build the quiz. Try another topic.")
-        context.user_data["quiz"] = {"topic": topic, "level": prefs["cefr"],
-                                     "questions": qs, "idx": 0, "attempts": 0}
-        return await send_quiz_question(update, context)
+            return await update.message.reply_text("Failed to build the card. Try another word." if lang != "ru" else "Не удалось создать карточку. Попробуй другое слово.")
 
-    # other modes: simple steering chat (reading/grammar/dialogue)
-    await update.message.reply_text("Thinking…")
+    # READING MODE → build one short passage + MCQ (3–5 Qs)
+    if prefs["mode"] == "reading":
+        topic = user_message.strip() or "school life"
+        level = prefs["cefr"]
+        passage_prompt = (
+            f"Write a short reading passage (80–120 words) about '{topic}', level {level}, grades 6–9. "
+            f"Language: {'Russian' if lang=='ru' else 'English'} (A2–B1). School-safe. No bold."
+        )
+        passage = await ask_openai(
+            [{"role": "system", "content": POLICY_STUDY},
+             {"role": "user", "content": passage_prompt}],
+            max_tokens=220
+        )
+        await update.message.reply_text(trim(passage))
+        await log_event(update, context, "reading_passage", {"topic": topic})
+        # then build 3 MCQs
+        mcq_items = await build_mcq(topic, lang, level)
+        mcq_items = mcq_items[:3] if len(mcq_items) > 3 else mcq_items
+        context.user_data["practice"] = {
+            "type": "mcq", "topic": topic, "items": mcq_items,
+            "idx": 0, "attempts": 0, "score": 0, "ui_lang": lang
+        }
+        await log_event(update, context, "practice_build", {"ptype": "mcq", "topic": topic, "q_count": len(mcq_items)})
+        return await send_practice_item(update, context)
+
+    # GRAMMAR MODE → explain first; if user says "practice", generate exercises
+    if prefs["mode"] == "grammar":
+        text = user_message.strip()
+        # If user asks for practice explicitly:
+        if re.search(r"\b(practice|exercises|tasks)\b", text, re.I) or CYRILLIC_RE.search(text) and re.search(r"(упражн|практик)", text, re.I):
+            topic = context.user_data.get("last_grammar_topic", "general grammar")
+            level = prefs["cefr"]
+            items = await build_text_items("verb", topic, lang, level)
+            context.user_data["practice"] = {
+                "type": "verb","topic": topic,"items": items,
+                "idx": 0,"attempts": 0,"score": 0,"ui_lang": lang
+            }
+            await log_event(update, context, "practice_build", {"ptype": "verb", "topic": topic, "q_count": len(items)})
+            return await send_practice_item(update, context)
+
+        # else explain grammar
+        context.user_data["last_grammar_topic"] = text or "Present Simple"
+        g_prompt = (
+            f"Explain briefly the grammar point: {context.user_data['last_grammar_topic']} "
+            f"for level {prefs['cefr']} in 3–5 bullets with 1–2 examples. "
+            f"Language: {'Russian' if lang=='ru' else 'English'}. No markdown bold."
+        )
+        exp = await ask_openai(
+            [{"role": "system", "content": POLICY_STUDY},
+             {"role": "user", "content": g_prompt}],
+            max_tokens=260
+        )
+        extra = "Type 'practice' to get exercises." if lang != "ru" else "Напиши 'practice', чтобы получить упражнения."
+        await log_event(update, context, "grammar_explain", {"topic": context.user_data["last_grammar_topic"]})
+        return await update.message.reply_text(trim(exp) + "\n\n" + extra)
+
+    # TALK MODE
+    if prefs["mode"] == "talk":
+        talk_state = context.user_data.get("talk") or {"topic": "daily life", "turns": 0}
+        reply = await talk_reply(user_message, talk_state["topic"], lang)
+        talk_state["turns"] = talk_state.get("turns", 0) + 1
+        context.user_data["talk"] = talk_state
+        await log_event(update, context, "talk_turn", {"turn": talk_state["turns"], "topic": talk_state["topic"]})
+        # wrap-up after limit
+        if talk_state["turns"] >= prefs.get("dialogue_limit", DEFAULT_DIALOGUE_LIMIT):
+            wrap = ("Great chat! Want to practice? Try Vocabulary or Practice from the menu."
+                    if lang != "ru" else
+                    "Отличная беседа! Хочешь потренироваться? Выбери Слова или Практика в меню.")
+            await update.message.reply_text(trim(reply))
+            await update.message.reply_text(wrap, reply_markup=root_menu(lang))
+            prefs["mode"] = "chat"
+            context.user_data.pop("talk", None)
+            return
+        return await update.message.reply_text(trim(reply))
+
+    # CHAT MODE (default) – hỏi gì cũng trả lời an toàn
     history = context.user_data.get("history", [])
     history.append({"role": "user", "content": user_message})
     history = history[-MAX_HISTORY:]
     context.user_data["history"] = history
 
-    mode_instruction = {
-        "reading": "Provide a short reading (80–120 words) on a school-safe topic plus 2–3 comprehension questions. No bold.",
-        "grammar": "Explain the grammar point (A2–B1) in 3–5 short bullets with 1–2 examples. No bold.",
-        "dialogue": (
-            "You are a friendly English conversation tutor for grades 6–9. "
-            "Reply in 1–3 short sentences, safe topics only. If off-topic, redirect to learning."
-        ),
-        "vocab": "Vocabulary helper.",
-        "quiz": "Quiz builder."
-    }.get(prefs["mode"], "General helper for English study.")
-
     steer = (
-        f"User language: {lang}\n"
-        f"Grade: {prefs['grade']} (target {prefs['cefr']})\n"
-        f"Mode: {prefs['mode']}\nInstruction: {mode_instruction}"
+        "Be helpful and concise. If the user asks about study tasks, you can suggest modes: "
+        "Vocabulary, Reading, Grammar, Practice, Talk."
     )
-
     messages = [
-        {"role": "system", "content": POLICY},
+        {"role": "system", "content": POLICY_CHAT},
         {"role": "user", "content": steer},
         *history
     ]
-    text = await ask_openai(messages, max_tokens=500)
-    context.user_data["history"].append({"role": "assistant", "content": text})
-    await update.message.reply_text(trim(text))
+    text_out = await ask_openai(messages, max_tokens=400)
+    await update.message.reply_text(trim(text_out))
 
-# --------------- FLASK (KEEP PORT OPEN) ---------------
+# ========== FLASK (KEEP PORT OPEN) ==========
 app = Flask(__name__)
 
 @app.get("/")
@@ -531,17 +924,13 @@ def start_flask():
     port = int(os.getenv("PORT", "10000"))
     app.run(host="0.0.0.0", port=port)
 
-# --------------- MAIN ---------------
+# ========== MAIN ==========
 def main():
     application = Application.builder().token(TELEGRAM_TOKEN).build()
 
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("help", help_cmd))
-    application.add_handler(CommandHandler("grade", lambda u,c: None))  # kept for compatibility
-    application.add_handler(CommandHandler("mode",  lambda u,c: None))
-    application.add_handler(CommandHandler("lang",  lambda u,c: None))
-    application.add_handler(CommandHandler("vocab", vocab_cmd))
-    application.add_handler(CommandHandler("quiz",  quiz_cmd))
+    application.add_handler(CommandHandler("vocab", vocab_cmd))  # optional shortcut
 
     application.add_handler(CallbackQueryHandler(on_cb))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
