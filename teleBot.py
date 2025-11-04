@@ -56,9 +56,11 @@ LOG_SALT = os.getenv("LOG_SALT", "").strip()
 logger.info("DEBUG => USE_OPENROUTER=%s | OR_KEY? %s | OA_KEY? %s | GSHEET? %s",
             USE_OPENROUTER, bool(OR_KEY), bool(OA_KEY), bool(GSHEET_WEBHOOK))
 
+# --- HTTPX client (follow redirects để POST tới GAS không lỗi 302) ---
 httpx_client = httpx.Client(
     timeout=httpx.Timeout(connect=30.0, read=90.0, write=90.0, pool=90.0),
-    limits=httpx.Limits(max_keepalive_connections=10, max_connections=20)
+    limits=httpx.Limits(max_keepalive_connections=10, max_connections=20),
+    follow_redirects=True  # [P1] quan trọng cho Google Apps Script
 )
 
 if USE_OPENROUTER:
@@ -585,6 +587,12 @@ async def diag_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def logtest_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     ok = await log_event(context, "logtest", update.effective_user.id, {"ping": "pong"})
     await safe_reply_message(update.message, f"Logtest -> {'OK' if ok else 'FAILED'}")
+# --- DEBUG: xem last_text đang lưu gì ---
+async def debug_last(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    s = context.user_data.get("last_text") or context.user_data.get("reading", {}).get("last_passage", "")
+    preview = (s[:250] + "…") if len(s) > 250 else s
+    await safe_reply_message(update.message, f"last_text len={len(s)}\n{preview}")
+
 
 # =========================================================
 # 14) CALLBACK HANDLER (INLINE BUTTONS)
@@ -747,30 +755,51 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     intent = detect_intent(user_message)
 
     # [15B] TRANSLATE intent (uses last_text if only keyword)
+    # ==== [B1.4] INTENT: TRANSLATE (uses last_text if no content) ====
     if intent == "translate":
-        only_keyword = re.fullmatch(r"\s*(translate|dịch|переведи)\s*\.?", user_message, flags=re.I)
-        text_for_tr = context.user_data.get("last_text", "") if only_keyword else user_message
+        # chuẩn bị biến mặc định
+        text_for_tr = ""
+
+        # người dùng chỉ gõ từ khoá "translate/dịch/переведи" ?
+        only_kw = re.fullmatch(r"\s*(translate|dịch|переведи)\s*\.?", user_message, flags=re.I) is not None
+
+        if only_kw:
+            # lấy đoạn nhớ gần nhất (ưu tiên last_text, sau đó passage đã đọc)
+            text_for_tr = (
+                context.user_data.get("last_text")
+                or context.user_data.get("reading", {}).get("last_passage", "")
+            )
+        else:
+            # người dùng kèm nội dung cần dịch
+            text_for_tr = _extract_translate_content(user_message)
+            remember_last_text(context, text_for_tr)
+
+        # chưa có nội dung nào để dịch → nhắc người dùng
         if not text_for_tr:
             return await safe_reply_message(
                 update.message,
-                "I can translate, but I need some text. Paste it or say 'Translate' right after I send a text."
+                "I can translate, but I need some text. Please paste it or say 'Translate' right after I send a passage."
             )
-        await show_typing(update)
+
+        # chọn ngôn ngữ đích
         target_lang = "Russian" if detect_lang(text_for_tr) != "ru" else "English"
         prompt = (
             f"Translate this into {target_lang} (A2–B1, natural for a middle-schooler). "
             f"If needed, add one short helpful note:\n\n{text_for_tr}"
         )
-        out = await safe_ask(
+
+        out = await ask_openai(
             [{"role": "system", "content": POLICY_CHAT},
              {"role": "user", "content": prompt}],
             max_tokens=220
         )
-        if not out:
-            await log_event(context, "intent_translate_fail", uid, {})
-            return await safe_reply_message(update.message, "Sorry, translation failed. Please try again.")
-        await log_event(context, "intent_translate", uid, {"used_last_text": bool(only_keyword)})
+        await log_event(context, "intent_translate", uid, {"used_last_text": only_kw})
         return await safe_reply_message(update.message, trim(out))
+    # ==== [END B1.4] ====    
+  
+
+# ===== END INTENT: TRANSLATE =====
+
 
     if intent == "define_word":
         m = re.search(r"define\s+(\w+)", user_message, re.I)
@@ -883,21 +912,26 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if prefs["mode"] == "reading":
         topic = user_message.strip() or "school life"
         level = prefs["cefr"]
-        await show_typing(update)
-        passage = await safe_ask(
+        passage_prompt = (
+            f"Write a short reading passage (80–120 words) about '{topic}', level {level}, grades 6–9. "
+            f"Language: {'Russian' if lang=='ru' else 'English'} (A2–B1). School-safe. No bold."
+        )
+        passage = await ask_openai(
             [{"role": "system", "content": POLICY_STUDY},
-             {"role": "user", "content": (
-                 f"Write a short reading passage (80–120 words) about '{topic}', level {level}, grades 6–9. "
-                 f"Language: {'Russian' if lang=='ru' else 'English'} (A2–B1). School-safe. No bold."
-             )}],
+             {"role": "user", "content": passage_prompt}],
             max_tokens=220
         )
-        if not passage:
-            await log_event(context, "reading_passage_fail", uid, {"topic": topic})
-            return await safe_reply_message(update.message, "Sorry, I couldn't build the passage. Please try again.")
+
+        # gửi + NHỚ lại để intent Translate dùng ngay sau đó
         await safe_reply_message(update.message, trim(passage))
-        remember_last_text(context, passage)  # so 'Translate' works on it
+        remember_last_text(context, passage)                    # [P3.1]
+        context.user_data["reading"] = {                        # [P3.2]
+            "topic": topic,
+            "last_passage": passage
+        }
+
         await log_event(context, "reading_passage", uid, {"topic": topic})
+
         mcq_items = await build_mcq(topic, lang, level)
         mcq_items = mcq_items[:3] if len(mcq_items) > 3 else mcq_items
         context.user_data["practice"] = {
@@ -905,6 +939,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "idx": 0, "attempts": 0, "score": 0, "ui_lang": lang
         }
         return await send_practice_item(update, context)
+
 
     if prefs["mode"] == "grammar":
         text = user_message.strip()
@@ -983,6 +1018,7 @@ def main():
     application.add_handler(CommandHandler("ping", ping_cmd))
     application.add_handler(CommandHandler("diag", diag_cmd))
     application.add_handler(CommandHandler("logtest", logtest_cmd))
+    application.add_handler(CommandHandler("debug_last", debug_last))
 
     application.add_handler(CallbackQueryHandler(on_cb))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
