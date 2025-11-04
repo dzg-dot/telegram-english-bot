@@ -165,6 +165,14 @@ def extract_json(s: str):
                 continue
     return json.loads(s)
 
+# --- anon id helper ---
+def make_user_hash(user_id: object, salt: str) -> str:
+    try:
+        raw = (str(user_id) + "|" + (salt or "")).encode("utf-8")
+        return hashlib.sha256(raw).hexdigest()[:12]  # 12 ký tự là đủ cho thống kê
+    except Exception:
+        return "unknown"
+
 # =========================================================
 # 4) USER PREFS / SESSION STATE
 # =========================================================
@@ -187,7 +195,8 @@ def remember_last_text(context: ContextTypes.DEFAULT_TYPE, text: str):
         context.user_data["last_text"] = text
 
 # =========================================================
-# 5) GOOGLE SHEET LOGGING (basic)
+# =========================================================
+# 5) GOOGLE SHEET LOGGING (ẩn danh user)
 # =========================================================
 async def log_event(context: ContextTypes.DEFAULT_TYPE, event: str, user_id, extra: dict | None = None):
     if not GSHEET_WEBHOOK:
@@ -195,9 +204,13 @@ async def log_event(context: ContextTypes.DEFAULT_TYPE, event: str, user_id, ext
     try:
         prefs = get_prefs(int(user_id)) if isinstance(user_id, int) else {}
         ts = datetime.now(timezone.utc).isoformat()
+
+        # tạo mã ẩn danh ổn định
+        anon_id = make_user_hash(user_id, LOG_SALT)
+
         payload = {
             "timestamp": ts,
-            "user_id": str(user_id),
+            "user_hash": anon_id,           # ← dùng hash thay vì user_id
             "event": event,
             "mode": prefs.get("mode"),
             "lang": prefs.get("lang"),
@@ -205,17 +218,22 @@ async def log_event(context: ContextTypes.DEFAULT_TYPE, event: str, user_id, ext
             "cefr": prefs.get("cefr"),
             "extra": extra or {}
         }
-        sig_src = f"{payload['user_id']}|{payload['event']}|{payload['timestamp']}|{LOG_SALT}"
-        signature = hmac.new(LOG_SALT.encode("utf-8"), sig_src.encode("utf-8"), hashlib.sha256).hexdigest() if LOG_SALT else ""
+
+        # (tùy chọn) chữ ký HMAC theo hash + event + ts
+        signature = ""
+        if LOG_SALT:
+            sig_src = f"{payload['user_hash']}|{payload['event']}|{payload['timestamp']}|{LOG_SALT}"
+            signature = hmac.new(LOG_SALT.encode("utf-8"), sig_src.encode("utf-8"), hashlib.sha256).hexdigest()
+
         headers = {"X-Log-Signature": signature} if signature else {}
-        # Follow 302 of Apps Script
+
         await asyncio.to_thread(
             httpx_client.post,
             GSHEET_WEBHOOK,
             json=payload,
             headers=headers,
-            timeout=12.0,
-            follow_redirects=True
+            timeout=10.0,
+            follow_redirects=True,   # ← phòng 302 của Apps Script
         )
     except Exception as e:
         logger.warning("log_event failed: %s", e)
