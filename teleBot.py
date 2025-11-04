@@ -1,4 +1,7 @@
 # teleBot.py
+# =========================================================
+# 0) IMPORTS & GLOBAL SETUP
+# =========================================================
 import os
 import re
 import json
@@ -8,6 +11,7 @@ import hashlib
 import logging
 import threading
 import asyncio
+import uuid
 from datetime import datetime, timezone
 
 import httpx
@@ -24,14 +28,15 @@ from telegram.ext import (
     ContextTypes, filters
 )
 
-# ========== LOGGING ==========
+# =========================================================
+# 1) LOGGING & STARTUP HOOKS
+# =========================================================
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s | %(levelname)s | %(name)s | %(message)s"
 )
 logger = logging.getLogger(__name__)
 
-# ========== STARTUP HOOKS ==========
 async def on_error(update: object, context: ContextTypes.DEFAULT_TYPE):
     logger.exception("Exception while handling an update:", exc_info=context.error)
     try:
@@ -44,7 +49,9 @@ async def on_startup(app: Application):
     await app.bot.delete_webhook(drop_pending_updates=True)
     logger.info("Webhook deleted, switching to long-polling.")
 
-# ========== ENV & CLIENTS ==========
+# =========================================================
+# 2) ENV & API CLIENTS
+# =========================================================
 load_dotenv()
 
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
@@ -85,7 +92,9 @@ else:
     client = OpenAI(api_key=OA_KEY, http_client=httpx_client)
     MODEL_NAME = "gpt-3.5-turbo"
 
-# ========== CONSTANTS & HELPERS ==========
+# =========================================================
+# 3) CONSTANTS, HELPERS, POLICIES
+# =========================================================
 DEFAULT_LANG = "auto"   # auto|en|ru
 MAX_HISTORY = 10
 ALLOWED_MODES = {"chat", "vocab", "reading", "grammar", "practice", "talk"}
@@ -167,8 +176,10 @@ def extract_json(s: str):
                 continue
     return json.loads(s)
 
-# ========== USER PREFS / STATE ==========
-user_prefs = {}
+# =========================================================
+# 4) USER PREFS / SESSION STATE
+# =========================================================
+user_prefs = {}  # RAM store
 
 def get_prefs(user_id: int):
     if user_id not in user_prefs:
@@ -181,7 +192,9 @@ def get_prefs(user_id: int):
         }
     return user_prefs[user_id]
 
-# ========== GOOGLE SHEET LOGGING ==========
+# =========================================================
+# 5) GOOGLE SHEET LOGGING
+# =========================================================
 async def log_event(context: ContextTypes.DEFAULT_TYPE, event: str, user_id, extra: dict | None = None):
     if not GSHEET_WEBHOOK:
         return
@@ -205,7 +218,9 @@ async def log_event(context: ContextTypes.DEFAULT_TYPE, event: str, user_id, ext
     except Exception as e:
         logger.warning("log_event failed: %s", e)
 
-# ========== SAFE SENDER HELPERS ==========
+# =========================================================
+# 6) SAFE SENDER HELPERS (TRÁNH 400 Bad Request)
+# =========================================================
 async def safe_reply_message(message, text: str, reply_markup=None):
     try:
         return await message.reply_text(text, reply_markup=reply_markup)
@@ -234,7 +249,9 @@ async def safe_edit_text(query, text: str, reply_markup=None):
         except Exception as e3:
             logger.exception("Fallback edit failed: %s", e3)
 
-# ========== INTENT LAYER (SMART OVERRIDES) ==========
+# =========================================================
+# 7) INTENT LAYER (SMART OVERRIDES)
+# =========================================================
 INTENT_PATTERNS = {
     "translate": re.compile(r"\btranslate\b|\bdịch\b|\bпереведи\b", re.I),
     "more_examples": re.compile(r"\bmore examples\b|\bví dụ thêm\b|\bещё примеры\b", re.I),
@@ -248,7 +265,6 @@ def detect_intent(text: str):
     for k, rx in INTENT_PATTERNS.items():
         if rx.search(t):
             return k
-    # lightweight extras
     if re.search(r"\bexample(s)?\b", t, re.I) and len(t.split()) <= 6:
         return "more_examples"
     if re.search(r"\b(correct|check)\b.*\banswer(s)?\b", t, re.I):
@@ -257,7 +273,45 @@ def detect_intent(text: str):
         return "translate"
     return None
 
-# ========== UI (INLINE MENUS) ==========
+# --- Translation helpers (detect target language + extract text) ---
+_TRANSLATE_TARGETS = {
+    # vi
+    r"\bsang tiếng nga\b": "ru",
+    r"\bsang tiếng anh\b": "en",
+    r"\btiếng nga\b": "ru",
+    r"\btiếng anh\b": "en",
+    # en
+    r"\bto russian\b": "ru",
+    r"\binto russian\b": "ru",
+    r"\bto english\b": "en",
+    r"\binto english\b": "en",
+    r"\bru\b": "ru",
+    r"\ben\b": "en",
+    # ru
+    r"\bна русский\b": "ru",
+    r"\bна английский\b": "en",
+}
+
+def _guess_translate_target(text: str, ui_lang: str) -> str:
+    t = text.lower()
+    for pat, tgt in _TRANSLATE_TARGETS.items():
+        if re.search(pat, t):
+            return tgt
+    return "en" if ui_lang == "ru" else "ru"
+
+def _extract_translate_content(text: str) -> str:
+    t = text.strip()
+    m = re.search(r"(?::|–|-)\s*(.+)$", t)
+    if m and len(m.group(1).strip()) >= 2:
+        return m.group(1).strip()
+    m = re.match(r"^(translate|dịch|переведи)\s+(.*)$", t, flags=re.I)
+    if m and len(m.group(2).strip()) >= 2:
+        return m.group(2).strip()
+    return t
+
+# =========================================================
+# 8) UI (INLINE MENUS)
+# =========================================================
 def root_menu(lang: str) -> InlineKeyboardMarkup:
     if lang == "ru":
         kb = [
@@ -343,7 +397,9 @@ def mcq_buttons(options):
          InlineKeyboardButton(f"D) {options[3]}", callback_data="ans:D")]
     ])
 
-# ========== START / HELP ==========
+# =========================================================
+# 9) START / HELP COMMANDS
+# =========================================================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text_in = (update.message.text or "").strip()
     greet = "Hi there! I’m your English study buddy. How can I help you today?"
@@ -361,7 +417,9 @@ async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await safe_reply_message(update.message, msg, reply_markup=root_menu(lang))
     await log_event(context, "help", update.effective_user.id, {"lang": lang})
 
-# ========== VOCAB ==========
+# =========================================================
+# 10) VOCAB BUILDER
+# =========================================================
 async def build_vocab_card(headword: str, prefs: dict, user_text: str) -> str:
     lang_for_examples = prefs.get("lang", "auto")
     if lang_for_examples == "auto":
@@ -386,7 +444,9 @@ async def build_vocab_card(headword: str, prefs: dict, user_text: str) -> str:
             {"role": "user", "content": prompt}]
     return await ask_openai(msgs, max_tokens=320)
 
-# ========== PRACTICE BUILDERS ==========
+# =========================================================
+# 11) PRACTICE BUILDERS (MCQ + TEXT TYPES)
+# =========================================================
 def normalize_answer(s: str) -> str:
     s = (s or "").strip().lower()
     s = re.sub(r"[^\w\s'-]", "", s)
@@ -505,7 +565,9 @@ async def practice_summary(update: Update, context: ContextTypes.DEFAULT_TYPE):
     })
     context.user_data.pop("practice", None)
 
-# ========== TALK (CONVERSATION COACH) ==========
+# =========================================================
+# 12) TALK COACH
+# =========================================================
 async def talk_reply(user_text: str, topic: str, ui_lang: str):
     prompt = (
         "You are a friendly English conversation coach for a middle-school student (A2–B1). "
@@ -521,7 +583,9 @@ async def talk_reply(user_text: str, topic: str, ui_lang: str):
     ]
     return await ask_openai([{"role": "system", "content": prompt}, *msgs], max_tokens=180)
 
-# ========== COMMANDS ==========
+# =========================================================
+# 13) OPTIONAL COMMANDS
+# =========================================================
 async def vocab_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     prefs = get_prefs(update.effective_user.id)
     prefs["mode"] = "vocab"
@@ -533,7 +597,9 @@ async def logtest_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await log_event(context, "logtest", update.effective_user.id, ok)
     await safe_reply_message(update.message, "Logtest sent (if GSHEET_WEBHOOK is set).")
 
-# ========== CALLBACK HANDLER ==========
+# =========================================================
+# 14) CALLBACK HANDLER (INLINE BUTTONS)
+# =========================================================
 async def on_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
     data = q.data or ""
@@ -545,7 +611,6 @@ async def on_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if ui_lang == "auto":
         ui_lang = "ru" if CYRILLIC_RE.search(q.message.text or "") else "en"
 
-    # MENUS
     if data == "menu:root":
         msg = "Back to menu." if ui_lang != "ru" else "Возврат в меню."
         await safe_edit_text(q, msg, reply_markup=root_menu(ui_lang))
@@ -584,7 +649,6 @@ async def on_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await safe_edit_text(q, "Invalid grade.", reply_markup=root_menu(ui_lang))
         return
 
-    # MODE ENTRIES
     if data.startswith("menu:mode:"):
         mode = data.split(":")[-1]  # vocab/reading/grammar/practice/talk
         prefs["mode"] = mode
@@ -606,7 +670,6 @@ async def on_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await safe_edit_text(q, txt, reply_markup=talk_topics_menu(ui_lang))
         return
 
-    # PRACTICE TYPE SELECT
     if data.startswith("practice:type:"):
         ptype = data.split(":")[-1]
         context.user_data["practice"] = {
@@ -623,7 +686,6 @@ async def on_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await log_event(context, "practice_type_set", uid, {"ptype": ptype})
         return
 
-    # TALK TOPIC
     if data.startswith("talk:topic:"):
         topic_key = data.split(":")[-1]
         mapping = {
@@ -638,7 +700,6 @@ async def on_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await log_event(context, "talk_topic_set", uid, {"topic": topic})
         return
 
-    # PRACTICE ANSWER (MCQ)
     if data.startswith("ans:"):
         st = context.user_data.get("practice")
         if not st or st.get("type") != "mcq":
@@ -683,7 +744,9 @@ async def on_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await send_practice_item(q, context)
         return
 
-# ========== FREE TEXT HANDLER ==========
+# =========================================================
+# 15) FREE TEXT HANDLER (INTENT-FIRST ⇒ MODE FALLBACK)
+# =========================================================
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_message = update.message.text or ""
     if blocked(user_message):
@@ -701,13 +764,19 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # ---- SMART INTENT OVERRIDES (work in ANY mode) ----
     intent = detect_intent(user_message)
     if intent == "translate":
-        prompt = f"Translate this into {'Russian' if lang=='ru' else 'English'} (A2–B1) and explain in one short line if needed:\n\n{user_message}"
+        target = _guess_translate_target(user_message, lang)  # 'ru' or 'en'
+        content = _extract_translate_content(user_message)
+        target_name = "Russian" if target == "ru" else "English"
+        prompt = (
+            f"Translate this into {target_name} (A2–B1). "
+            f"Keep it natural and concise. If needed, add one brief note.\n\n{content}"
+        )
         out = await ask_openai(
             [{"role": "system", "content": POLICY_CHAT},
              {"role": "user", "content": prompt}],
-            max_tokens=180
+            max_tokens=220
         )
-        await log_event(context, "intent_translate", uid, {})
+        await log_event(context, "intent_translate", uid, {"target": target})
         return await safe_reply_message(update.message, trim(out))
 
     if intent == "define_word":
@@ -732,7 +801,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return await safe_reply_message(update.message, trim(out))
 
     if intent == "new_questions":
-        # quick MCQ set (3 câu) theo chủ đề gần nhất
         topic = context.user_data.get("practice", {}).get("topic") or "school life"
         items = await build_mcq(topic, lang, prefs["cefr"])
         items = items[:3] if len(items) > 3 else items
@@ -820,7 +888,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             else:
                 return await send_practice_item(update, context)
 
-    # ---- MODE-SPECIFIC (with smart fallback) ----
+    # ---- MODE-SPECIFIC (fallbacks) ----
     if prefs["mode"] == "vocab":
         word = user_message.strip()
         if not word:
@@ -858,7 +926,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if prefs["mode"] == "grammar":
         text = user_message.strip()
         context.user_data["last_grammar_topic"] = text or context.user_data.get("last_grammar_topic") or "Present Simple"
-        # Nếu người dùng gõ câu hỏi khác/giải thích thêm → vẫn giải thích ngắn gọn
         g_prompt = (
             f"Explain briefly the grammar point: {context.user_data['last_grammar_topic']} "
             f"for level {prefs['cefr']} in 3–5 bullets with 1–2 examples. "
@@ -908,7 +975,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await safe_reply_message(update.message, trim(text_out))
     await log_event(context, "chat_message", uid, {"chars": len(user_message)})
 
-# ========== FLASK (KEEP PORT OPEN) ==========
+# =========================================================
+# 16) FLASK HEALTHCHECK
+# =========================================================
 app = Flask(__name__)
 
 @app.get("/")
@@ -919,7 +988,9 @@ def start_flask():
     port = int(os.getenv("PORT", "10000"))
     app.run(host="0.0.0.0", port=port)
 
-# ========== MAIN ==========
+# =========================================================
+# 17) MAIN ENTRYPOINT
+# =========================================================
 def main():
     application = Application.builder().token(TELEGRAM_TOKEN).build()
 
