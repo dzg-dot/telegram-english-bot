@@ -191,6 +191,17 @@ def get_prefs(user_id: int):
             "dialogue_limit": DEFAULT_DIALOGUE_LIMIT,
         }
     return user_prefs[user_id]
+# ==== [B1.1] REMEMBER LAST TEXT (helper) ====
+def remember_last_text(context: ContextTypes.DEFAULT_TYPE, text: str):
+    """
+    Lưu một đoạn văn gần nhất (>= 8 ký tự) vào context.user_data["last_text"]
+    để các intent như 'Translate' dùng lại nếu người dùng không dán lại text.
+    """
+    text = (text or "").strip()
+    if text and len(text) >= 8:
+        context.user_data["last_text"] = text
+# ==== [END B1.1] ====
+
 
 # =========================================================
 # 5) GOOGLE SHEET LOGGING
@@ -749,6 +760,10 @@ async def on_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # =========================================================
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_message = update.message.text or ""
+    # ==== [B1.2] REMEMBER user's message ====
+    if user_message and len(user_message) >= 8:
+        remember_last_text(context, user_message)
+# ==== [END B1.2] ====
     if blocked(user_message):
         return await safe_reply_message(
             update.message,
@@ -763,21 +778,34 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # ---- SMART INTENT OVERRIDES (work in ANY mode) ----
     intent = detect_intent(user_message)
+    # ==== [B1.4] INTENT: TRANSLATE (uses last_text if no content) ====
     if intent == "translate":
-        target = _guess_translate_target(user_message, lang)  # 'ru' or 'en'
-        content = _extract_translate_content(user_message)
-        target_name = "Russian" if target == "ru" else "English"
-        prompt = (
-            f"Translate this into {target_name} (A2–B1). "
-            f"Keep it natural and concise. If needed, add one brief note.\n\n{content}"
-        )
-        out = await ask_openai(
-            [{"role": "system", "content": POLICY_CHAT},
-             {"role": "user", "content": prompt}],
-            max_tokens=220
-        )
-        await log_event(context, "intent_translate", uid, {"target": target})
-        return await safe_reply_message(update.message, trim(out))
+        # Nếu user chỉ gõ 'translate/dịch/переведи' → dùng đoạn gần nhất đã lưu
+        only_keyword = re.fullmatch(r"\s*(translate|dịch|переведи)\s*\.?", user_message, flags=re.I) 
+        text_for_tr = context.user_data.get("last_text", "") if only_keyword else user_message
+    if not text_for_tr:
+        # Không có đoạn nào để dịch
+        return await safe_reply_message(
+        update.message,
+        "I can translate, but I need some text. Please paste it or ask me to translate the last passage again."
+         )
+
+    # Chọn ngôn ngữ đích: nếu text_for_tr không phải tiếng Nga, dịch sang Nga; ngược lại dịch sang Anh
+    target_lang = "Russian" if detect_lang(text_for_tr) != "ru" else "English"
+    prompt = (
+        f"Translate this into {target_lang} (A2–B1, natural for a middle-schooler). "
+        f"If needed, add one short helpful note:\n\n{text_for_tr}"
+    )
+
+    out = await ask_openai(
+        [{"role": "system", "content": POLICY_CHAT},
+        {"role": "user", "content": prompt}],
+        max_tokens=220
+    )
+    await log_event(context, "intent_translate", uid, {"used_last_text": bool(only_keyword)})
+    return await safe_reply_message(update.message, trim(out))
+# ==== [END B1.4] ====
+
 
     if intent == "define_word":
         m = re.search(r"define\s+(\w+)", user_message, re.I)
@@ -914,6 +942,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             max_tokens=220
         )
         await safe_reply_message(update.message, trim(passage))
+        # ==== [B1.3] REMEMBER passage ====
+        remember_last_text(context, passage)
+        # ==== [END B1.3] ====
         await log_event(context, "reading_passage", uid, {"topic": topic})
         mcq_items = await build_mcq(topic, lang, level)
         mcq_items = mcq_items[:3] if len(mcq_items) > 3 else mcq_items
