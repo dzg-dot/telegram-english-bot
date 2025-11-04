@@ -1,4 +1,4 @@
-# teleBot.py
+# teleBot_stable.py
 # =========================================================
 # 0) IMPORTS & GLOBAL SETUP
 # =========================================================
@@ -12,7 +12,6 @@ from flask import Flask
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.error import BadRequest
-from telegram.constants import ChatAction
 from telegram.ext import (
     Application, CommandHandler, MessageHandler, CallbackQueryHandler,
     ContextTypes, filters
@@ -21,8 +20,10 @@ from telegram.ext import (
 # =========================================================
 # 1) LOGGING & STARTUP HOOKS
 # =========================================================
-logging.basicConfig(level=logging.INFO,
-                    format="%(asctime)s | %(levelname)s | %(name)s | %(message)s")
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s | %(levelname)s | %(name)s | %(message)s"
+)
 logger = logging.getLogger(__name__)
 
 async def on_error(update: object, context: ContextTypes.DEFAULT_TYPE):
@@ -56,11 +57,9 @@ LOG_SALT = os.getenv("LOG_SALT", "").strip()
 logger.info("DEBUG => USE_OPENROUTER=%s | OR_KEY? %s | OA_KEY? %s | GSHEET? %s",
             USE_OPENROUTER, bool(OR_KEY), bool(OA_KEY), bool(GSHEET_WEBHOOK))
 
-# --- HTTPX client (follow redirects để POST tới GAS không lỗi 302) ---
 httpx_client = httpx.Client(
     timeout=httpx.Timeout(connect=30.0, read=90.0, write=90.0, pool=90.0),
-    limits=httpx.Limits(max_keepalive_connections=10, max_connections=20),
-    follow_redirects=True  # [P1] quan trọng cho Google Apps Script
+    limits=httpx.Limits(max_keepalive_connections=10, max_connections=20)
 )
 
 if USE_OPENROUTER:
@@ -70,8 +69,10 @@ if USE_OPENROUTER:
         base_url="https://openrouter.ai/api/v1",
         api_key=OR_KEY,
         http_client=httpx_client,
-        default_headers={"HTTP-Referer": "https://t.me/SearchVocabBot",
-                         "X-Title": "School English Bot"},
+        default_headers={
+            "HTTP-Referer": "https://t.me/SearchVocabBot",
+            "X-Title": "School English Bot",
+        },
     )
     MODEL_NAME = "openai/gpt-4o-mini"
 else:
@@ -90,11 +91,12 @@ ALLOWED_MODES = {"chat", "vocab", "reading", "grammar", "practice", "talk"}
 BANNED_KEYWORDS = [
     r"\bsex\b", r"\bporn\b", r"\berotic\b",
     r"\bviolence\b", r"\bsuicide\b", r"\bself[- ]?harm\b",
-    r"\bdrugs?\b", r"\balcohol\b", r"\bgamble\b", r"\bextremis(m|t)\b"
+    r"\bdrugs?\b", r"\balcohol\b", r"\bgamble\b",
+    r"\bextremis(m|t)\b"
 ]
 
 GRADE_TO_CEFR = {"6": "A2", "7": "A2+", "8": "B1-", "9": "B1"}
-DEFAULT_DIALOGUE_LIMIT = 10
+DEFAULT_DIALOGUE_LIMIT = 20  # <== TALK LIMIT = 20
 
 POLICY_CHAT = (
     "You are a safe, school-appropriate assistant for grades 6–9. "
@@ -146,20 +148,6 @@ async def ask_openai(messages, max_tokens=500, temperature=0.3, model=None):
             except Exception:
                 return f"[OpenAI error] {type(e1).__name__}: {e1}"
 
-# ---- [3A] safer LLM wrapper + typing indicator ----
-async def safe_ask(messages, max_tokens=400, temperature=0.3, model=None):
-    try:
-        return await ask_openai(messages, max_tokens=max_tokens, temperature=temperature, model=model)
-    except Exception as e:
-        logger.exception("LLM failed: %s", e)
-        return None
-
-async def show_typing(update: Update):
-    try:
-        await update.effective_chat.send_action(ChatAction.TYPING)
-    except Exception:
-        pass
-
 def extract_json(s: str):
     s = (s or "").strip()
     if "```" in s:
@@ -193,18 +181,17 @@ def get_prefs(user_id: int):
         }
     return user_prefs[user_id]
 
-# ---- [4A] remember last long text for Translate intent ----
 def remember_last_text(context: ContextTypes.DEFAULT_TYPE, text: str):
     text = (text or "").strip()
     if text and len(text) >= 8:
         context.user_data["last_text"] = text
 
 # =========================================================
-# 5) GOOGLE SHEET LOGGING
+# 5) GOOGLE SHEET LOGGING (basic)
 # =========================================================
-async def log_event(context: ContextTypes.DEFAULT_TYPE, event: str, user_id, extra: dict | None = None) -> bool:
+async def log_event(context: ContextTypes.DEFAULT_TYPE, event: str, user_id, extra: dict | None = None):
     if not GSHEET_WEBHOOK:
-        return False
+        return
     try:
         prefs = get_prefs(int(user_id)) if isinstance(user_id, int) else {}
         ts = datetime.now(timezone.utc).isoformat()
@@ -219,23 +206,22 @@ async def log_event(context: ContextTypes.DEFAULT_TYPE, event: str, user_id, ext
             "extra": extra or {}
         }
         sig_src = f"{payload['user_id']}|{payload['event']}|{payload['timestamp']}|{LOG_SALT}"
-        signature = hmac.new(LOG_SALT.encode("utf-8"), sig_src.encode("utf-8"),
-                             hashlib.sha256).hexdigest() if LOG_SALT else ""
+        signature = hmac.new(LOG_SALT.encode("utf-8"), sig_src.encode("utf-8"), hashlib.sha256).hexdigest() if LOG_SALT else ""
         headers = {"X-Log-Signature": signature} if signature else {}
-
-        def _post():
-            return httpx_client.post(GSHEET_WEBHOOK, json=payload, headers=headers, timeout=10.0)
-        resp = await asyncio.to_thread(_post)
-        ok = 200 <= resp.status_code < 300
-        if not ok:
-            logger.error("GSHEET POST %s -> %s %s", event, resp.status_code, resp.text[:200])
-        return ok
+        # Follow 302 of Apps Script
+        await asyncio.to_thread(
+            httpx_client.post,
+            GSHEET_WEBHOOK,
+            json=payload,
+            headers=headers,
+            timeout=12.0,
+            follow_redirects=True
+        )
     except Exception as e:
         logger.warning("log_event failed: %s", e)
-        return False
 
 # =========================================================
-# 6) SAFE SENDER HELPERS (TRÁNH 400 Bad Request)
+# 6) SAFE SENDER HELPERS
 # =========================================================
 async def safe_reply_message(message, text: str, reply_markup=None):
     try:
@@ -277,7 +263,7 @@ INTENT_PATTERNS = {
 }
 
 def detect_intent(text: str):
-    t = text.strip()
+    t = (text or "").strip()
     for k, rx in INTENT_PATTERNS.items():
         if rx.search(t):
             return k
@@ -288,6 +274,31 @@ def detect_intent(text: str):
     if re.search(r"\btranslate\b|\bdịch\b|\bперевод\b", t, re.I):
         return "translate"
     return None
+
+_TRANSLATE_HINTS = {
+    r"\bsang tiếng nga\b": "ru", r"\btiếng nga\b": "ru",
+    r"\bsang tiếng anh\b": "en", r"\btiếng anh\b": "en",
+    r"\bto russian\b": "ru", r"\binto russian\b": "ru",
+    r"\bto english\b": "en", r"\binto english\b": "en",
+    r"\bна русский\b": "ru", r"\bна английский\b": "en",
+}
+
+def _guess_translate_target(text: str, ui_lang: str) -> str:
+    t = text.lower()
+    for pat, tgt in _TRANSLATE_HINTS.items():
+        if re.search(pat, t):
+            return tgt
+    return "en" if ui_lang == "ru" else "ru"
+
+def _extract_translate_content(text: str) -> str:
+    t = text.strip()
+    m = re.search(r"(?::|–|-)\s*(.+)$", t)
+    if m and len(m.group(1).strip()) >= 2:
+        return m.group(1).strip()
+    m = re.match(r"^(translate|dịch|переведи)\s+(.*)$", t, flags=re.I)
+    if m and len(m.group(2).strip()) >= 2:
+        return m.group(2).strip()
+    return t
 
 # =========================================================
 # 8) UI (INLINE MENUS)
@@ -318,22 +329,20 @@ def root_menu(lang: str) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(kb)
 
 def lang_menu() -> InlineKeyboardMarkup:
-    kb = [
+    return InlineKeyboardMarkup([
         [InlineKeyboardButton("English", callback_data="set_lang:en"),
          InlineKeyboardButton("Русский", callback_data="set_lang:ru")],
         [InlineKeyboardButton("⬅️ Back", callback_data="menu:root")]
-    ]
-    return InlineKeyboardMarkup(kb)
+    ])
 
 def grade_menu() -> InlineKeyboardMarkup:
-    kb = [
+    return InlineKeyboardMarkup([
         [InlineKeyboardButton("6", callback_data="set_grade:6"),
          InlineKeyboardButton("7", callback_data="set_grade:7"),
          InlineKeyboardButton("8", callback_data="set_grade:8"),
          InlineKeyboardButton("9", callback_data="set_grade:9")],
         [InlineKeyboardButton("⬅️ Back", callback_data="menu:root")]
-    ]
-    return InlineKeyboardMarkup(kb)
+    ])
 
 def practice_menu(lang="en") -> InlineKeyboardMarkup:
     if lang == "ru":
@@ -342,7 +351,7 @@ def practice_menu(lang="en") -> InlineKeyboardMarkup:
     else:
         text = ["Multiple Choice", "Verb Forms", "Gap Fill",
                 "Word Formation", "Error Correction", "Sentence Ordering"]
-    kb = [
+    return InlineKeyboardMarkup([
         [InlineKeyboardButton(f"🅰 {text[0]}", callback_data="practice:type:mcq"),
          InlineKeyboardButton(f"🔤 {text[1]}", callback_data="practice:type:verb")],
         [InlineKeyboardButton(f"🕳 {text[2]}", callback_data="practice:type:gap"),
@@ -350,15 +359,14 @@ def practice_menu(lang="en") -> InlineKeyboardMarkup:
         [InlineKeyboardButton(f"❌ {text[4]}", callback_data="practice:type:error"),
          InlineKeyboardButton(f"🔁 {text[5]}", callback_data="practice:type:order")],
         [InlineKeyboardButton("⬅️ Back", callback_data="menu:root")]
-    ]
-    return InlineKeyboardMarkup(kb)
+    ])
 
 def talk_topics_menu(lang="en") -> InlineKeyboardMarkup:
     if lang == "ru":
         lbl = ["Быт", "Школа", "Хобби", "Окружающая среда", "Праздники", "Семья"]
     else:
         lbl = ["Daily life", "School life", "Hobbies", "Environment", "Holidays", "Family"]
-    kb = [
+    return InlineKeyboardMarkup([
         [InlineKeyboardButton(lbl[0], callback_data="talk:topic:daily"),
          InlineKeyboardButton(lbl[1], callback_data="talk:topic:school")],
         [InlineKeyboardButton(lbl[2], callback_data="talk:topic:hobbies"),
@@ -366,8 +374,7 @@ def talk_topics_menu(lang="en") -> InlineKeyboardMarkup:
         [InlineKeyboardButton(lbl[4], callback_data="talk:topic:holidays"),
          InlineKeyboardButton(lbl[5], callback_data="talk:topic:family")],
         [InlineKeyboardButton("⬅️ Back", callback_data="menu:root")]
-    ]
-    return InlineKeyboardMarkup(kb)
+    ])
 
 def mcq_buttons(options):
     return InlineKeyboardMarkup([
@@ -537,7 +544,7 @@ async def practice_summary(update: Update, context: ContextTypes.DEFAULT_TYPE):
         lines.append("Answers and explanations:")
     for it in st["items"]:
         expl = it["explain_ru"] if lang == "ru" and it["explain_ru"] else it["explain_en"]
-        ans = it.get("answer") or it.get("answer", "")
+        ans = it.get("answer") or ""
         lines.append(f"Q{it['id']}: {ans} — {expl}")
     await safe_reply_message(update.message, "\n".join(lines))
     await log_event(context, "practice_done", update.effective_user.id, {
@@ -564,7 +571,7 @@ async def talk_reply(user_text: str, topic: str, ui_lang: str):
     return await ask_openai([{"role": "system", "content": prompt}, *msgs], max_tokens=180)
 
 # =========================================================
-# 13) OPTIONAL COMMANDS (ping/diag/logtest)
+# 13) OPTIONAL COMMANDS
 # =========================================================
 async def vocab_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     prefs = get_prefs(update.effective_user.id)
@@ -572,27 +579,10 @@ async def vocab_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await safe_reply_message(update.message, "Vocabulary mode is ON. Send me a word.")
     await log_event(context, "mode_set", update.effective_user.id, {"mode": "vocab"})
 
-async def ping_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await safe_reply_message(update.message, "pong")
-
-async def diag_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    ok = {
-        "USE_OPENROUTER": USE_OPENROUTER,
-        "GSHEET_WEBHOOK_set": bool(GSHEET_WEBHOOK),
-        "LOG_SALT_set": bool(LOG_SALT),
-        "mode": get_prefs(update.effective_user.id).get("mode"),
-    }
-    await safe_reply_message(update.message, f"diag: {ok}")
-
 async def logtest_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    ok = await log_event(context, "logtest", update.effective_user.id, {"ping": "pong"})
-    await safe_reply_message(update.message, f"Logtest -> {'OK' if ok else 'FAILED'}")
-# --- DEBUG: xem last_text đang lưu gì ---
-async def debug_last(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    s = context.user_data.get("last_text") or context.user_data.get("reading", {}).get("last_passage", "")
-    preview = (s[:250] + "…") if len(s) > 250 else s
-    await safe_reply_message(update.message, f"last_text len={len(s)}\n{preview}")
-
+    ok = {"ping": "pong", "note": "manual test"}
+    await log_event(context, "logtest", update.effective_user.id, ok)
+    await safe_reply_message(update.message, "Logtest sent (if GSHEET_WEBHOOK is set).")
 
 # =========================================================
 # 14) CALLBACK HANDLER (INLINE BUTTONS)
@@ -628,7 +618,7 @@ async def on_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if data.startswith("set_lang:"):
         lang = data.split(":", 1)[1]
         prefs["lang"] = lang
-        txt = f"Language set to {lang.upper()}." if lang != "ru" else "Язык: Русский."
+        txt = f"Language set to {lang.upper()}." if lang!="ru" else "Язык: Русский."
         await safe_edit_text(q, txt, reply_markup=root_menu(lang))
         await log_event(context, "lang_set", uid, {"lang": lang})
         return
@@ -647,7 +637,7 @@ async def on_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     if data.startswith("menu:mode:"):
-        mode = data.split(":")[-1]  # vocab/reading/grammar/practice/talk
+        mode = data.split(":")[-1]
         prefs["mode"] = mode
         await log_event(context, "mode_set", uid, {"mode": mode})
         if mode == "vocab":
@@ -680,8 +670,10 @@ async def on_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if data.startswith("talk:topic:"):
         topic_key = data.split(":")[-1]
-        mapping = {"daily": "daily life", "school": "school life", "hobbies": "hobbies",
-                   "env": "environment", "holidays": "holidays", "family": "family"}
+        mapping = {
+            "daily": "daily life", "school": "school life", "hobbies": "hobbies",
+            "env": "environment", "holidays": "holidays", "family": "family"
+        }
         topic = mapping.get(topic_key, "daily life")
         prefs["mode"] = "talk"
         context.user_data["talk"] = {"topic": topic, "turns": 0}
@@ -733,9 +725,8 @@ async def on_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # =========================================================
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_message = update.message.text or ""
-    logger.info("RX text from %s: %s", update.effective_user.id, user_message[:200])
 
-    # [15A] remember long texts for Translate
+    # nhớ đoạn văn gần nhất cho translate
     if user_message and len(user_message) >= 8:
         remember_last_text(context, user_message)
 
@@ -751,72 +742,58 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if lang == "auto":
         lang = detect_lang(user_message)
 
-    # ---- SMART INTENT OVERRIDES (work in ANY mode) ----
+    # ---- INTENT OVERRIDES (chạy ở mọi mode) ----
     intent = detect_intent(user_message)
 
-    # [15B] TRANSLATE intent (uses last_text if only keyword)
-    # ==== [B1.4] INTENT: TRANSLATE (uses last_text if no content) ====
     if intent == "translate":
-        # chuẩn bị biến mặc định
-        text_for_tr = ""
-
-        # người dùng chỉ gõ từ khoá "translate/dịch/переведи" ?
         only_kw = re.fullmatch(r"\s*(translate|dịch|переведи)\s*\.?", user_message, flags=re.I) is not None
-
         if only_kw:
-            # lấy đoạn nhớ gần nhất (ưu tiên last_text, sau đó passage đã đọc)
-            text_for_tr = (
-                context.user_data.get("last_text")
-                or context.user_data.get("reading", {}).get("last_passage", "")
-            )
+            text_for_tr = (context.user_data.get("last_text")
+                           or context.user_data.get("reading", {}).get("last_passage", ""))
         else:
-            # người dùng kèm nội dung cần dịch
             text_for_tr = _extract_translate_content(user_message)
             remember_last_text(context, text_for_tr)
 
-        # chưa có nội dung nào để dịch → nhắc người dùng
         if not text_for_tr:
             return await safe_reply_message(
                 update.message,
-                "I can translate, but I need some text. Please paste it or say 'Translate' right after I send a passage."
+                "I can translate, but I need some text. Please paste it or ask me again after sending a passage."
             )
 
-        # chọn ngôn ngữ đích
-        target_lang = "Russian" if detect_lang(text_for_tr) != "ru" else "English"
+        tgt = _guess_translate_target(text_for_tr, lang)
+        target_name = "Russian" if tgt == "ru" else "English"
         prompt = (
-            f"Translate this into {target_lang} (A2–B1, natural for a middle-schooler). "
-            f"If needed, add one short helpful note:\n\n{text_for_tr}"
+            f"Translate this into {target_name} (A2–B1, natural for a middle-schooler). "
+            f"If helpful, add one short note:\n\n{text_for_tr}"
         )
-
         out = await ask_openai(
             [{"role": "system", "content": POLICY_CHAT},
              {"role": "user", "content": prompt}],
             max_tokens=220
         )
-        await log_event(context, "intent_translate", uid, {"used_last_text": only_kw})
+        # basic logging only
+        await log_event(context, "chat_message", uid, {"chars": len(user_message)})  # count as activity
         return await safe_reply_message(update.message, trim(out))
-    # ==== [END B1.4] ====    
-  
-
-# ===== END INTENT: TRANSLATE =====
-
 
     if intent == "define_word":
         m = re.search(r"define\s+(\w+)", user_message, re.I)
         head = m.group(1) if m else user_message
         card = await build_vocab_card(head, prefs, user_message)
-        await log_event(context, "intent_define", uid, {"word": head})
+        await log_event(context, "chat_message", uid, {"chars": len(user_message)})
         return await safe_reply_message(update.message, trim(card))
 
     if intent == "more_examples":
         topic = context.user_data.get("last_grammar_topic") or context.user_data.get("practice", {}).get("topic") or "daily life"
-        p = (f"Give 3 short example sentences (A2–B1) about '{topic}'. "
-             f"Language: {'Russian' if lang=='ru' else 'English'}. No bold. Keep it compact.")
-        out = await safe_ask([{"role": "system", "content": POLICY_STUDY},
-                              {"role": "user", "content": p}], max_tokens=150)
-        if not out:
-            return await safe_reply_message(update.message, "Couldn't generate examples, try again.")
-        await log_event(context, "intent_more_examples", uid, {"topic": topic})
+        p = (
+            f"Give 3 short example sentences (A2–B1) about '{topic}'. "
+            f"Language: {'Russian' if lang=='ru' else 'English'}. No bold. Keep it compact."
+        )
+        out = await ask_openai(
+            [{"role": "system", "content": POLICY_STUDY},
+             {"role": "user", "content": p}],
+            max_tokens=150
+        )
+        await log_event(context, "chat_message", uid, {"chars": len(user_message)})
         return await safe_reply_message(update.message, trim(out))
 
     if intent == "new_questions":
@@ -827,13 +804,13 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "type": "mcq","topic": topic,"items": items,
             "idx": 0,"attempts": 0,"score": 0,"ui_lang": lang
         }
-        await log_event(context, "intent_new_questions", uid, {"topic": topic, "count": len(items)})
+        await log_event(context, "practice_built", uid, {"ptype": "mcq", "topic": topic, "count": len(items)})
         return await send_practice_item(update, context)
 
     if intent == "summary_request":
         st = context.user_data.get("practice")
         if st and st.get("items"):
-            await log_event(context, "intent_summary", uid, {"type": st["type"]})
+            await log_event(context, "chat_message", uid, {"chars": len(user_message)})
             return await practice_summary(update, context)
         else:
             msg = "No active exercise yet." if lang != "ru" else "Активных заданий пока нет."
@@ -853,14 +830,17 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except Exception:
             msg = "Failed to build exercises. Please try another topic." if lang != "ru" else "Не удалось создать задания. Попробуй другую тему."
             await safe_reply_message(update.message, msg)
-            await log_event(context, "practice_build_fail", uid, {"ptype": st["type"], "topic": topic})
+            await log_event(context, "chat_message", uid, {"chars": len(user_message)})
             return
         if not st["items"]:
             msg = "No items generated. Try another topic." if lang != "ru" else "Задания не созданы. Попробуй другую тему."
             await safe_reply_message(update.message, msg)
-            await log_event(context, "practice_empty", uid, {"ptype": st["type"], "topic": topic})
+            await log_event(context, "chat_message", uid, {"chars": len(user_message)})
             return
-        st["idx"] = 0; st["attempts"] = 0; st["score"] = 0; st["ui_lang"] = lang
+        st["idx"] = 0
+        st["attempts"] = 0
+        st["score"] = 0
+        st["ui_lang"] = lang
         await log_event(context, "practice_built", uid, {"ptype": st["type"], "topic": topic, "count": len(st["items"])})
         return await send_practice_item(update, context)
 
@@ -872,25 +852,27 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             user_ans = normalize_answer(user_message)
             gold = normalize_answer(qitem["answer"])
             if user_ans == gold:
-                st["score"] += 1; st["attempts"] = 0
+                st["score"] += 1
+                st["attempts"] = 0
                 expl = qitem["explain_ru"] if st["ui_lang"] == "ru" and qitem["explain_ru"] else qitem["explain_en"]
                 ok = "Correct!" if st["ui_lang"] != "ru" else "Верно!"
                 await safe_reply_message(update.message, f"{ok}\n{expl}".strip())
-                await log_event(context, "practice_answer", uid, {"ptype": st["type"], "qid": qitem.get("id"), "correct": True})
+                await log_event(context, "chat_message", uid, {"chars": len(user_message)})
                 st["idx"] += 1
             else:
                 st["attempts"] += 1
                 if st["attempts"] < 2:
                     again = "Not quite. Try again." if st["ui_lang"] != "ru" else "Почти. Попробуй еще раз."
                     await safe_reply_message(update.message, again)
-                    await log_event(context, "practice_answer", uid, {"ptype": st["type"], "qid": qitem.get("id"), "correct": False, "retry": True})
+                    await log_event(context, "chat_message", uid, {"chars": len(user_message)})
                     return
                 st["attempts"] = 0
                 ans = f"The correct answer is: {qitem['answer']}" if st["ui_lang"] != "ru" else f"Правильный ответ: {qitem['answer']}"
                 expl = qitem["explain_ru"] if st["ui_lang"] == "ru" and qitem["explain_ru"] else qitem["explain_en"]
                 await safe_reply_message(update.message, f"{ans}\n{expl}".strip())
-                await log_event(context, "practice_answer", uid, {"ptype": st["type"], "qid": qitem.get("id"), "correct": False, "revealed": True})
+                await log_event(context, "chat_message", uid, {"chars": len(user_message)})
                 st["idx"] += 1
+
             if st["idx"] >= len(st["items"]):
                 return await practice_summary(update, context)
             else:
@@ -903,14 +885,14 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return await safe_reply_message(update.message, "Send a word to look up." if lang != "ru" else "Отправь слово.")
         try:
             card = await build_vocab_card(word, prefs, update.message.text)
-            await log_event(context, "vocab_lookup", uid, {"word": word})
+            await log_event(context, "chat_message", uid, {"chars": len(user_message)})
             return await safe_reply_message(update.message, trim(card))
         except Exception:
-            await log_event(context, "vocab_fail", uid, {"word": word})
+            await log_event(context, "chat_message", uid, {"chars": len(user_message)})
             return await safe_reply_message(update.message, "Failed to build the card. Try another word." if lang != "ru" else "Не удалось создать карточку. Попробуй другое слово.")
 
     if prefs["mode"] == "reading":
-        topic = user_message.strip() or "school life"
+        topic = user_message.strip() or context.user_data.get("last_reading_topic") or "school life"
         level = prefs["cefr"]
         passage_prompt = (
             f"Write a short reading passage (80–120 words) about '{topic}', level {level}, grades 6–9. "
@@ -921,15 +903,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
              {"role": "user", "content": passage_prompt}],
             max_tokens=220
         )
-
-        # gửi + NHỚ lại để intent Translate dùng ngay sau đó
         await safe_reply_message(update.message, trim(passage))
-        remember_last_text(context, passage)                    # [P3.1]
-        context.user_data["reading"] = {                        # [P3.2]
-            "topic": topic,
-            "last_passage": passage
-        }
-
+        remember_last_text(context, passage)  # để translate dùng lại
+        context.user_data["reading"] = {"topic": topic, "last_passage": passage}
+        context.user_data["last_reading_topic"] = topic
         await log_event(context, "reading_passage", uid, {"topic": topic})
 
         mcq_items = await build_mcq(topic, lang, level)
@@ -940,7 +917,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         }
         return await send_practice_item(update, context)
 
-
     if prefs["mode"] == "grammar":
         text = user_message.strip()
         context.user_data["last_grammar_topic"] = text or context.user_data.get("last_grammar_topic") or "Present Simple"
@@ -949,25 +925,21 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"for level {prefs['cefr']} in 3–5 bullets with 1–2 examples. "
             f"Language: {'Russian' if lang=='ru' else 'English'}. No markdown bold."
         )
-        exp = await safe_ask([{"role": "system", "content": POLICY_STUDY},
-                              {"role": "user", "content": g_prompt}], max_tokens=260)
-        if not exp:
-            return await safe_reply_message(update.message, "Couldn't explain now, please try again.")
-        await log_event(context, "grammar_explain", uid, {"topic": context.user_data['last_grammar_topic']})
+        exp = await ask_openai(
+            [{"role": "system", "content": POLICY_STUDY},
+             {"role": "user", "content": g_prompt}],
+            max_tokens=260
+        )
+        await log_event(context, "chat_message", uid, {"chars": len(user_message)})
         extra = "Type 'practice' to get exercises." if lang != "ru" else "Напиши 'practice', чтобы получить упражнения."
         return await safe_reply_message(update.message, trim(exp) + "\n\n" + extra)
 
     if prefs["mode"] == "talk":
         talk_state = context.user_data.get("talk") or {"topic": "daily life", "turns": 0}
-        reply = await safe_ask([{"role": "system", "content": (
-            "You are a friendly English conversation coach for a middle-school student (A2–B1). "
-            f"Topic: {talk_state['topic']}. Respond in 1–3 sentences. Encourage gently. No markdown bold."
-        )}, {"role": "user", "content": f"Student says: {user_message}"}], max_tokens=180)
-        if not reply:
-            reply = "Let's keep talking! Tell me more."
+        reply = await talk_reply(user_message, talk_state["topic"], lang)
         talk_state["turns"] = talk_state.get("turns", 0) + 1
         context.user_data["talk"] = talk_state
-        await log_event(context, "talk_turn", uid, {"topic": talk_state["topic"], "turn": talk_state["turns"]})
+        await log_event(context, "chat_message", uid, {"chars": len(user_message)})
         if talk_state["turns"] >= prefs.get("dialogue_limit", DEFAULT_DIALOGUE_LIMIT):
             wrap = ("Great chat! Want to practice? Try Vocabulary or Practice from the menu."
                     if lang != "ru" else "Отличная беседа! Хочешь потренироваться? Выбери Слова или Практика в меню.")
@@ -983,13 +955,16 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     history.append({"role": "user", "content": user_message})
     history = history[-MAX_HISTORY:]
     context.user_data["history"] = history
-    steer = ("Be helpful and concise. If the user asks about study tasks, you can suggest modes: "
-             "Vocabulary, Reading, Grammar, Practice, Talk.")
-    messages = [{"role": "system", "content": POLICY_CHAT},
-                {"role": "user", "content": steer}, *history]
-    text_out = await safe_ask(messages, max_tokens=400)
-    if not text_out:
-        text_out = "Sorry, I couldn't answer right now."
+    steer = (
+        "Be helpful and concise. If the user asks about study tasks, you can suggest modes: "
+        "Vocabulary, Reading, Grammar, Practice, Talk."
+    )
+    messages = [
+        {"role": "system", "content": POLICY_CHAT},
+        {"role": "user", "content": steer},
+        *history
+    ]
+    text_out = await ask_openai(messages, max_tokens=400)
     await safe_reply_message(update.message, trim(text_out))
     await log_event(context, "chat_message", uid, {"chars": len(user_message)})
 
@@ -1015,10 +990,7 @@ def main():
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("help", help_cmd))
     application.add_handler(CommandHandler("vocab", vocab_cmd))
-    application.add_handler(CommandHandler("ping", ping_cmd))
-    application.add_handler(CommandHandler("diag", diag_cmd))
     application.add_handler(CommandHandler("logtest", logtest_cmd))
-    application.add_handler(CommandHandler("debug_last", debug_last))
 
     application.add_handler(CallbackQueryHandler(on_cb))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
