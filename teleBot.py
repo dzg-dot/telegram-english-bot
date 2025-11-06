@@ -1050,12 +1050,16 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         reset_nudge(context)
         word = re.sub(r"[^A-Za-z '-]", "", text).strip()
         card = await build_vocab_card(word, prefs)
+        # 🩹 FIX: lưu từ cuối để callback "Practice this word" hoạt động
+        context.user_data["last_word"] = word
+        add_vocab_to_bank(context, word)
         kb = InlineKeyboardMarkup([
             [InlineKeyboardButton("✏️ Practice this word", callback_data="vocab:practice"),
              InlineKeyboardButton("🏠 Menu", callback_data="menu:root")]
         ])
         await safe_reply_message(update.message, trim(card), reply_markup=kb)
         await log_event(context, "vocab_card", uid, {"word": word})
+        prefs["mode"] = "vocab"
         return await maybe_nudge(update, context, lang)
 
     # --- GRAMMAR ---
