@@ -82,7 +82,7 @@ else:
 # =========================================================
 # 3) CONSTANTS, HELPERS, POLICIES
 # =========================================================
-DEFAULT_LANG = "auto"          # auto|en|ru
+DEFAULT_LANG = "auto"
 MAX_HISTORY  = 10
 DEFAULT_DIALOGUE_LIMIT = 20
 
@@ -98,14 +98,13 @@ GRADE_TO_CEFR = {"6": "A2", "7": "A2+", "8": "B1-", "9": "B1"}
 POLICY_CHAT = (
     "You are a safe, school-appropriate assistant for grades 6–9. "
     "Focus only on English language learning topics (vocabulary, grammar, reading, speaking, writing). "
-    "Do not answer questions about other school subjects such as math, science, or history — politely redirect to English learning. "
-    "No markdown bold or headings. English by default; if the user writes Russian, respond in Russian. "
-    "Be friendly, concise, and helpful. If a request is unsafe/off-topic (adult/violent/etc.), refuse and steer to study topics. "
-    "Level A2–B1."
+    "No other subjects such as math or science. "
+    "Be friendly, concise, and helpful. Encourage learning and practice. "
+    "No markdown bold or headings. Level A2–B1."
 )
 POLICY_STUDY = (
     "You are an English study assistant for grades 6–9 (CEFR A2–B1). "
-    "No markdown bold or headings. Keep answers short, safe, and age-appropriate."
+    "Keep all responses school-appropriate, plain text (no bold), short and useful."
 )
 
 CYRILLIC_RE = re.compile(r"[А-Яа-яЁё]")
@@ -122,6 +121,7 @@ def blocked(text: str) -> bool:
         if re.search(pat, text or "", flags=re.IGNORECASE):
             return True
     return False
+
 # =========================================================
 # 4) USER PREFS / SESSION STATE
 # =========================================================
@@ -226,208 +226,105 @@ async def safe_edit_text(query, text: str, reply_markup=None):
 # =========================================================
 # 7) UI (INLINE MENUS)
 # =========================================================
-def lang_menu() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton("English",  callback_data="set_lang:en"),
-         InlineKeyboardButton("Русский",  callback_data="set_lang:ru")],
-    ])
-
 def root_menu(lang: str) -> InlineKeyboardMarkup:
     if lang == "ru":
         kb = [
-            [InlineKeyboardButton("📚 Слова",        callback_data="menu:mode:vocab"),
-             InlineKeyboardButton("📖 Чтение",       callback_data="menu:mode:reading")],
-            [InlineKeyboardButton("⚙️ Грамматика",   callback_data="menu:mode:grammar"),
-             InlineKeyboardButton("💬 Разговор",     callback_data="menu:mode:talk")],
-            [InlineKeyboardButton("📝 Практика",     callback_data="menu:mode:practice")],
-            [InlineKeyboardButton("🏫 Класс",        callback_data="menu:grade"),
-             InlineKeyboardButton("🌐 Язык",         callback_data="menu:lang")],
-            [InlineKeyboardButton("❓ Справка",       callback_data="menu:help")]
+            [InlineKeyboardButton("🏫 Класс", callback_data="menu:grade"),
+             InlineKeyboardButton("🌐 Язык", callback_data="menu:lang")],
+            [InlineKeyboardButton("💬 Разговор", callback_data="menu:mode:talk"),
+             InlineKeyboardButton("📝 Практика", callback_data="menu:mode:practice")],
+            [InlineKeyboardButton("❓ Помощь", callback_data="menu:help")]
         ]
     else:
         kb = [
-            [InlineKeyboardButton("📚 Vocabulary",   callback_data="menu:mode:vocab"),
-             InlineKeyboardButton("📖 Reading",      callback_data="menu:mode:reading")],
-            [InlineKeyboardButton("⚙️ Grammar",      callback_data="menu:mode:grammar"),
-             InlineKeyboardButton("💬 Talk",         callback_data="menu:mode:talk")],
-            [InlineKeyboardButton("📝 Practice",     callback_data="menu:mode:practice")],
-            [InlineKeyboardButton("🏫 Grade",        callback_data="menu:grade"),
-             InlineKeyboardButton("🌐 Language",     callback_data="menu:lang")],
-            [InlineKeyboardButton("❓ Help",         callback_data="menu:help")]
+            [InlineKeyboardButton("🏫 Grade", callback_data="menu:grade"),
+             InlineKeyboardButton("🌐 Language", callback_data="menu:lang")],
+            [InlineKeyboardButton("💬 Talk", callback_data="menu:mode:talk"),
+             InlineKeyboardButton("📝 Practice", callback_data="menu:mode:practice")],
+            [InlineKeyboardButton("❓ Help", callback_data="menu:help")]
         ]
     return InlineKeyboardMarkup(kb)
-def reading_entry_menu(lang="en") -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton("📌 Topic",   callback_data="reading:input:topic"),
-         InlineKeyboardButton("📝 My text", callback_data="reading:input:mytext")],
-        [InlineKeyboardButton("⬅️ Back",    callback_data="menu:root")]
-    ])
-
-def reading_footer_kb(lang="en") -> InlineKeyboardMarkup:
-    t = {
-        "gloss": "abc Translate (gloss)",
-        "prac":  "📝 Practice from this text",
-        "again": "🔁 Another text",
-        "back":  "⬅️ Back"
-    } if lang != "ru" else {
-        "gloss": "abc Перевод (глоссы)",
-        "prac":  "📝 Упражнения по тексту",
-        "again": "🔁 Ещё текст",
-        "back":  "⬅️ Назад"
-    }
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton(t["gloss"], callback_data="reading:gloss"),
-         InlineKeyboardButton(t["prac"],  callback_data="reading:practice")],
-        [InlineKeyboardButton(t["again"], callback_data="footer:new_text")],
-        [InlineKeyboardButton(t["back"],  callback_data="menu:root")]
-    ])
-
-def vocab_footer_kb(lang="en") -> InlineKeyboardMarkup:
-    t = {
-        "practice": "✏️ Practice this word",
-        "more":     "➕ More examples",
-        "back":     "⬅️ Back"
-    } if lang != "ru" else {
-        "practice": "✏️ Тренировка по слову",
-        "more":     "➕ Ещё примеры",
-        "back":     "⬅️ Назад"
-    }
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton(t["practice"], callback_data="vocab:practice"),
-         InlineKeyboardButton(t["more"],     callback_data="vocab:more")],
-        [InlineKeyboardButton(t["back"],     callback_data="menu:root")]
-    ])
-
-def grammar_footer_kb(lang="en") -> InlineKeyboardMarkup:
-    t = {
-        "prac": "✏️ Practice this rule",
-        "more": "📚 Explain more",
-        "back": "⬅️ Back"
-    } if lang != "ru" else {
-        "prac": "✏️ Тренировка по правилу",
-        "more": "📚 Пояснить подробнее",
-        "back": "⬅️ Назад"
-    }
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton(t["prac"], callback_data="grammar:practice"),
-         InlineKeyboardButton(t["more"], callback_data="footer:explain_more")],
-        [InlineKeyboardButton(t["back"], callback_data="menu:root")]
-    ])
-
-def practice_footer_kb(scope: str, lang="en") -> InlineKeyboardMarkup:
-    t = {
-        "again":    "🔁 Again",
-        "new_word": "🔎 New word",
-        "new_text": "🔁 Another text",
-        "new_rule": "🔎 New rule",
-        "menu":     "🏠 Menu"
-    } if lang != "ru" else {
-        "again":    "🔁 Ещё задание",
-        "new_word": "🔎 Другое слово",
-        "new_text": "🔁 Другой текст",
-        "new_rule": "🔎 Другое правило",
-        "menu":     "🏠 Меню"
-    }
-    rows = [[InlineKeyboardButton(t["again"], callback_data="footer:more_practice")]]
-    if scope == "vocab":
-        rows.append([InlineKeyboardButton(t["new_word"], callback_data="footer:new_word")])
-    elif scope == "reading":
-        rows.append([InlineKeyboardButton(t["new_text"], callback_data="footer:new_text")])
-    elif scope == "grammar":
-        rows.append([InlineKeyboardButton(t["new_rule"], callback_data="footer:new_rule")])
-    rows.append([InlineKeyboardButton(t["menu"], callback_data="menu:root")])
-    return InlineKeyboardMarkup(rows)
-
-def mcq_buttons(options):
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton(f"A) {options[0]}", callback_data="ans:A"),
-         InlineKeyboardButton(f"B) {options[1]}", callback_data="ans:B")],
-        [InlineKeyboardButton(f"C) {options[2]}", callback_data="ans:C"),
-         InlineKeyboardButton(f"D) {options[3]}", callback_data="ans:D")]
-    ])
 
 # =========================================================
 # 8.5) HELP PROMPTS (for /help or menu:help)
 # =========================================================
 HELP_TEXT_EN = (
     "Prompt handbook:\n\n"
-    "Vocabulary:\n"
-    "- Define the word \"set up\" — include IPA, part of speech, short definition, Russian translation, and 2–3 examples.\n"
-    "- Give me the meaning of \"take off\" as a phrasal verb, with synonyms, antonyms, and 3 examples.\n\n"
-    "Reading:\n"
-    "- Write a short A2-level reading passage (about 100 words) about \"friendship\".\n"
-    "- Translate gloss for this text: <paste text>.\n\n"
-    "Grammar:\n"
-    "- Explain Present Perfect for A2–B1 with form, uses, and ✓/✗ examples.\n"
-    "- Show me Conditional Type 1 with 3 correct and 3 wrong examples.\n\n"
-    "Talk:\n"
-    "- Let's talk about school life.\n"
-    "- Start a short English conversation about hobbies at A2 level."
+    "Vocabulary: Define the word 'set up' — IPA, part of speech, definition, short Russian translation, 3 examples.\n"
+    "Reading: Write a short A2 text (100 words) about 'friendship'.\n"
+    "Grammar: Explain Present Perfect with ✓/✗ examples.\n"
+    "Gloss: Translate gloss for this text: <paste text>.\n"
+    "Talk: Let's talk about hobbies."
 )
 HELP_TEXT_RU = (
     "Памятка промптов:\n\n"
-    "Слова:\n"
-    "- Дай определение \"set up\" — IPA, часть речи, краткое объяснение, перевод на русский, 2–3 примера.\n"
-    "- Значение фразового глагола \"take off\" + синонимы/антонимы и 3 примера.\n\n"
-    "Чтение:\n"
-    "- Короткий текст уровня A2 (~100 слов) на тему \"дружба\".\n"
-    "- Глоссы для текста: <вставь текст>.\n\n"
-    "Грамматика:\n"
-    "- Объясни Present Perfect для A2–B1: форма, употребления, примеры ✓/✗.\n"
-    "- Условные предложения типа 1: 3 правильных и 3 неправильных примера.\n\n"
-    "Разговор:\n"
-    "- Поговорим о школьной жизни.\n"
-    "- Начни короткий диалог об увлечениях (уровень A2)."
+    "Слова: дай определение 'set up' — IPA, часть речи, краткое объяснение, перевод на русский, 3 примера.\n"
+    "Чтение: короткий текст уровня A2 (100 слов) на тему 'дружба'.\n"
+    "Грамматика: объясни Present Perfect с примерами ✓/✗.\n"
+    "Глоссы: переведи глоссы для текста.\n"
+    "Разговор: начни короткий диалог о хобби."
 )
-
 # =========================================================
 # 9) START / HELP COMMANDS
 # =========================================================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     greet = "Choose your language / Выбери язык:"
-    await safe_reply_message(update.message, greet, reply_markup=lang_menu())
-    prefs = get_prefs(update.effective_user.id)
-    prefs["mode"] = "chat"
-    context.user_data.pop("reading_input", None)
-    await log_event(context, "start", update.effective_user.id, {"text": (update.message.text or "")[:200]})
+    kb = InlineKeyboardMarkup([
+        [InlineKeyboardButton("English", callback_data="set_lang:en"),
+         InlineKeyboardButton("Русский", callback_data="set_lang:ru")]
+    ])
+    await safe_reply_message(update.message, greet, reply_markup=kb)
+    await log_event(context, "start", update.effective_user.id, {})
 
 async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     prefs = get_prefs(update.effective_user.id)
     lang = prefs.get("lang", "en")
     txt = HELP_TEXT_RU if lang == "ru" else HELP_TEXT_EN
     await safe_reply_message(update.message, txt, reply_markup=root_menu(lang))
-    await log_event(context, "help", update.effective_user.id, {"lang": lang})
+    await log_event(context, "help_open", update.effective_user.id, {"lang": lang})
 
 # =========================================================
 # 10) VOCAB / READING / GRAMMAR BUILDERS
 # =========================================================
-async def build_vocab_card(headword: str, prefs: dict, user_text: str) -> str:
-    lang_for_examples = prefs.get("lang", "auto")
-    if lang_for_examples == "auto":
-        lang_for_examples = detect_lang(user_text or "")
-    include_ru_examples = (lang_for_examples == "ru")
-
+async def build_vocab_card(headword: str, prefs: dict) -> str:
+    lang = prefs.get("lang", "en")
+    include_ru = (lang == "ru")
     prompt = (
-        "You are an English-learning assistant for grades 6–9 (CEFR A2–B1). "
-        "Make a compact vocabulary card. Do not use markdown bold or any asterisks. "
-        "Definition must be in English with a short Russian translation in parentheses. "
-        "Add short Synonyms and Antonyms lists if natural.\n\n"
-        f"HEADWORD: {headword}\nTARGET LEVEL: {prefs['cefr']}\n\n"
-        "Format exactly (plain text):\n"
-        "Word: <headword> /<IPA>/\n"
-        "POS: <part of speech>\n"
-        "Definition: <short English definition> (<short Russian translation>)\n"
-        "Synonyms: x, y, z (if any)\n"
-        "Antonyms: a, b (if any)\n"
-        "Examples:\n"
-        f"1) <short EN example>{' (RU translation)' if include_ru_examples else ''}\n"
-        f"2) <short EN example>{' (RU translation)' if include_ru_examples else ''}\n"
-        f"3) <short EN example>{' (optional RU translation)' if include_ru_examples else ' (optional)'}\n"
-        "Keep under 140 words."
+        "You are an English-learning assistant for grades 6–9 (A2–B1). "
+        "Create a clear vocabulary card with 3 examples (increasing difficulty). "
+        "Do NOT use markdown or bold. "
+        "Translate definition into Russian in parentheses if UI is Russian. "
+        "Examples remain in English only.\n\n"
+        f"HEADWORD: {headword}\nLEVEL: {prefs['cefr']}\n"
+        "Output format:\n"
+        "Word: <word> /<IPA>/\nPOS: <part of speech>\n"
+        "Definition: <EN definition>(<RU short translation>)\n"
+        "Synonyms: ...\nAntonyms: ...\n"
+        "Examples:\n1) ...\n2) ...\n3) ..."
     )
     msgs = [{"role": "system", "content": POLICY_STUDY},
             {"role": "user", "content": prompt}]
-    return await ask_openai(msgs, max_tokens=360)
+    return await ask_openai(msgs, max_tokens=380)
+
+async def build_reading_passage(topic: str, level: str, ui_lang: str):
+    prompt = f"Write a short A2–B1 reading passage (80–120 words) about '{topic}'. School-safe, plain English."
+    msgs = [{"role": "system", "content": POLICY_STUDY},
+            {"role": "user", "content": prompt}]
+    return await ask_openai(msgs, max_tokens=220)
+
+async def build_reading_gloss(text: str, ui_lang: str):
+    target = "Russian" if ui_lang != "ru" else "English"
+    prompt = (
+        "Gloss the text for A2–B1 learner:\n"
+        "- Highlight 12–15 useful chunks (phrasal verbs, idioms, collocations).\n"
+        "- Use _underscores_ for the chunk and give short "
+        f"{target} meaning in parentheses right after.\n"
+        "- Do not translate all text.\nTEXT:\n" + text
+    )
+    msgs = [{"role": "system", "content": POLICY_STUDY},
+            {"role": "user", "content": prompt}]
+    return await ask_openai(msgs, max_tokens=400)
+
 # =========================================================
 # 11) PRACTICE ENGINE (shared)
 # =========================================================
@@ -496,100 +393,179 @@ async def logtest_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     ok = {"ping": "pong", "note": "manual test"}
     await log_event(context, "logtest", update.effective_user.id, ok)
     await safe_reply_message(update.message, "Logtest sent (if GSHEET_WEBHOOK is set).")
+async def back_to_menu(update_or_query, context, lang="en"):
+    msg = "Back to menu." if lang != "ru" else "Возврат в меню."
+    await safe_reply_message(update_or_query.message if isinstance(update_or_query, Update) else update_or_query,
+                             msg, reply_markup=root_menu(lang))
 
 # =========================================================
 # 14) CALLBACK HANDLER (INLINE BUTTONS)
 # =========================================================
-async def on_cb(update:Update,context:ContextTypes.DEFAULT_TYPE):
-    q = update.callback_query
-    data = q.data or ""
-    await q.answer()
-    uid = update.effective_user.id
-    prefs = get_prefs(uid)
-    lang = prefs.get("lang","en")
-    unlocked = context.user_data.get("unlocked_modes",{})
+def increment_nudge_counter(context):
+    count = context.user_data.get("nudge_count", 0) + 1
+    context.user_data["nudge_count"] = count
+    return count
 
-    # basic menus
-    if data=="menu:root":
-        await safe_edit_text(q,"Back to menu.",reply_markup=root_menu(lang,unlocked)); return
-    if data.startswith("menu:mode:"):
-        prefs["mode"]=data.split(":")[-1]
-        await log_event(context,"mode_set",uid,{"mode":prefs["mode"]})
-        txt=f"{prefs['mode'].capitalize()} mode unlocked. Send your request!"
-        await safe_edit_text(q,txt,reply_markup=root_menu(lang,unlocked)); return
+def reset_nudge_counter(context):
+    context.user_data["nudge_count"] = 0
 
-    # answer MCQ
-    if data.startswith("ans:"):
-        st=context.user_data.get("practice")
-        if not st: return await safe_edit_text(q,"No active quiz.")
-        ch=data.split(":")[1]
-        qitem=st["items"][st["idx"]]
-        correct=qitem["answer"]
-        if ch==correct:
-            st["score"]+=1; msg="✅ Correct!"
-        else: msg=f"❌ Correct answer: {correct}"
-        await safe_edit_text(q,msg)
-        st["idx"]+=1
-        if st["idx"]>=len(st["items"]):
-            dummy=Update(update.update_id,message=q.message)
-            await practice_summary(dummy,context)
-        else: await send_practice_item(q,context)
-        return
+async def maybe_send_nudge(update, context, lang="en"):
+    count = increment_nudge_counter(context)
+    if count >= 3:
+        reset_nudge_counter(context)
+        msg = ("Do you want a quick 2-question mini-quiz? (≤1 min)"
+               if lang != "ru"
+               else "Хочешь мини-викторину из 2 вопросов? (≤1 мин)")
+        kb = InlineKeyboardMarkup([
+            [InlineKeyboardButton("▶️ Start", callback_data="nudge:start"),
+             InlineKeyboardButton("⏭ Skip",  callback_data="nudge:skip")]
+        ])
+        await safe_reply_message(update.message, msg, reply_markup=kb)
+        await log_event(context, "nudge_trigger", update.effective_user.id, {})
+
+async def reward_message(update, context, score, total, lang="en"):
+    if score == total:
+        msg = "🌟 Perfect! All correct!" if lang != "ru" else "🌟 Отлично! Все правильно!"
+    elif score / total >= 0.6:
+        msg = "⭐ Great work!" if lang != "ru" else "⭐ Отличная работа!"
+    else:
+        msg = "👏 Nice effort!" if lang != "ru" else "👏 Хорошая попытка!"
+    await safe_reply_message(update.message, msg,
+                             reply_markup=InlineKeyboardMarkup(
+                                 [[InlineKeyboardButton("🏠 Menu" if lang!="ru" else "🏠 Меню",
+                                                         callback_data="menu:root")]]))
+    await log_event(context, "reward_given", update.effective_user.id,
+                    {"score": score, "total": total})
 
 # =========================================================
 # 15) FREE TEXT HANDLER (chat-first)
 # =========================================================
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_message = update.message.text or ""
+    text = (update.message.text or "").strip()
+    if not text:
+        return
 
-    # remember last_text for translate/gloss
-    if user_message and len(user_message) >= 8:
-        remember_last_text(context, user_message)
-
-    # --- safety filters ---
-    if blocked(user_message):
-        return await safe_reply_message(
-            update.message,
-            "⛔ That's outside our classroom scope. Please try vocabulary, reading, grammar, talk, or practice."
-        )
-
-    # --- English-only restriction (soft but strict) ---
-    non_english_topics = [
-        "math", "physics", "chemistry", "biology", "history",
-        "geography", "geometry", "algebra", "calculus",
-        "literature", "philosophy", "economics", "politics",
-        "law", "astronomy", "programming", "python", "computer"
-    ]
-    if re.search(r"\b(" + "|".join(non_english_topics) + r")\b", user_message, re.I):
-        return await safe_reply_message(
-            update.message,
-            "Let's stay focused on English learning 😊 Try vocabulary, grammar, reading, or conversation instead."
-        )
+    # 1️⃣ Safety check
+    if blocked(text):
+        return await safe_reply_message(update.message,
+            "⛔ Let's keep our chat school-friendly and about English learning.")
 
     uid = update.effective_user.id
     prefs = get_prefs(uid)
     lang = prefs.get("lang", "en")
     if lang == "auto":
-        lang = detect_lang(user_message)
+        lang = detect_lang(text)
 
-    # (phần xử lý các mode vocab / reading / grammar / talk / practice giữ nguyên)
-    # ...
-    # cuối cùng chat mode default:
-    history = context.user_data.get("history", [])
-    history.append({"role": "user", "content": user_message})
-    history = history[-MAX_HISTORY:]
-    context.user_data["history"] = history
-    steer = (
-        "Be helpful and concise. If the user asks about study tasks, suggest: Vocabulary, Reading, Grammar, Talk, or Practice."
-    )
-    messages = [
-        {"role": "system", "content": POLICY_CHAT},
-        {"role": "user", "content": steer},
-        *history
-    ]
-    text_out = await ask_openai(messages, max_tokens=400)
-    await safe_reply_message(update.message, trim(text_out), reply_markup=root_menu(lang))
-    await log_event(context, "chat_message", uid, {"chars": len(user_message)})
+    # 2️⃣ Intent detection
+    t_low = text.lower()
+    # quick dictionary search
+    if len(t_low.split()) == 1 and t_low.isalpha():
+        intent = "vocab"
+        headword = t_low
+    elif re.search(r"\bdefine\b|\bmeaning of\b", t_low):
+        intent = "vocab"
+        headword = re.sub(r".*\b(?:define|meaning of)\b", "", t_low).strip()
+    elif re.search(r"\bgrammar\b|\bexplain\b|\brule\b", t_low):
+        intent = "grammar"
+    elif re.search(r"\bwrite a short text\b|\bread(?:ing)?\b", t_low):
+        intent = "reading"
+    elif re.search(r"\btranslate\b|\bgloss\b", t_low):
+        intent = "gloss"
+    elif re.search(r"\bquiz\b|\bpractice\b|\bexercise\b", t_low):
+        intent = "practice"
+    elif re.search(r"\btalk\b|\bconversation\b|\bchat\b", t_low):
+        intent = "talk"
+    else:
+        intent = "chat"
+
+    # 3️⃣ Route by intent
+    if intent == "vocab":
+        reset_nudge_counter(context)
+        card = await build_vocab_card(headword, prefs)
+        context.user_data["last_word"] = headword
+        kb = InlineKeyboardMarkup([
+            [InlineKeyboardButton("✏️ Practice this word", callback_data="vocab:practice"),
+             InlineKeyboardButton("➕ More examples", callback_data="vocab:more")],
+            [InlineKeyboardButton("🏠 Menu", callback_data="menu:root")]
+        ])
+        await safe_reply_message(update.message, trim(card), reply_markup=kb)
+        await log_event(context, "vocab_card", uid, {"word": headword})
+        return await maybe_send_nudge(update, context, lang)
+
+    if intent == "grammar":
+        reset_nudge_counter(context)
+        topic = text.strip()
+        g_prompt = (
+            f"Explain the grammar point '{topic}' for level {prefs['cefr']} "
+            "(grades 6–9) with 5–7 bullets, ✓/✗ examples and signal words. "
+            "If UI is Russian, add short Russian hints in parentheses."
+        )
+        exp = await ask_openai(
+            [{"role": "system", "content": POLICY_STUDY},
+             {"role": "user", "content": g_prompt}],
+            max_tokens=360)
+        kb = InlineKeyboardMarkup([
+            [InlineKeyboardButton("✏️ Practice this rule", callback_data="grammar:practice"),
+             InlineKeyboardButton("📚 Explain more", callback_data="footer:explain_more")],
+            [InlineKeyboardButton("🏠 Menu", callback_data="menu:root")]
+        ])
+        await safe_reply_message(update.message, trim(exp), reply_markup=kb)
+        await log_event(context, "grammar_explain", uid, {"topic": topic})
+        return await maybe_send_nudge(update, context, lang)
+
+    if intent == "reading":
+        reset_nudge_counter(context)
+        passage = await build_reading_passage(text, prefs["cefr"], lang)
+        context.user_data["last_passage"] = passage
+        kb = InlineKeyboardMarkup([
+            [InlineKeyboardButton("abc Translate (gloss)", callback_data="reading:gloss"),
+             InlineKeyboardButton("📝 Practice from this text", callback_data="reading:practice")],
+            [InlineKeyboardButton("🔁 Another text", callback_data="footer:new_text"),
+             InlineKeyboardButton("🏠 Menu", callback_data="menu:root")]
+        ])
+        await safe_reply_message(update.message, trim(passage), reply_markup=kb)
+        await log_event(context, "reading_passage", uid, {})
+        return await maybe_send_nudge(update, context, lang)
+
+    if intent == "gloss":
+        passage = context.user_data.get("last_passage", text)
+        glossed = await build_reading_gloss(passage, lang)
+        kb = InlineKeyboardMarkup([
+            [InlineKeyboardButton("📝 Practice from this text", callback_data="reading:practice"),
+             InlineKeyboardButton("🏠 Menu", callback_data="menu:root")]
+        ])
+        await safe_reply_message(update.message, trim(glossed), reply_markup=kb)
+        await log_event(context, "reading_gloss", uid, {})
+        return await maybe_send_nudge(update, context, lang)
+
+    if intent == "talk":
+        reset_nudge_counter(context)
+        topic = "school life"
+        context.user_data["talk"] = {"topic": topic, "turns": 0}
+        opener = "Let's talk! How are you today?" if lang != "ru" else "Поговорим! Как дела?"
+        await safe_reply_message(update.message, f"Topic: {topic}\n\n{opener}")
+        await log_event(context, "talk_start", uid, {})
+        return
+
+    if intent == "practice":
+        reset_nudge_counter(context)
+        items = await build_mcq(text, lang, prefs["cefr"], flavor="generic")
+        context.user_data["practice"] = {
+            "type": "mcq", "topic": text, "items": items,
+            "idx": 0, "score": 0, "ui_lang": lang, "scope": "free"
+        }
+        await log_event(context, "practice_start", uid, {"count": len(items)})
+        return await send_practice_item(update, context)
+
+    # default chat (encouraging)
+    msg = [{"role": "system", "content": POLICY_CHAT},
+           {"role": "user", "content": text}]
+    reply = await ask_openai(msg, max_tokens=300)
+    kb = InlineKeyboardMarkup(
+        [[InlineKeyboardButton("🏠 Menu", callback_data="menu:root")]])
+    await safe_reply_message(update.message, trim(reply), reply_markup=kb)
+    await log_event(context, "chat_message", uid, {"chars": len(text)})
+    await maybe_send_nudge(update, context, lang)
 
 # =========================================================
 # 16) FLASK HEALTHCHECK
