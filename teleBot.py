@@ -399,6 +399,87 @@ async def back_to_menu(update_or_query, context, lang="en"):
                              msg, reply_markup=root_menu(lang))
 
 # =========================================================
+# 13) CALLBACK HANDLER (INLINE BUTTONS)
+# =========================================================
+async def on_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    data = q.data or ""
+    await q.answer()
+
+    uid = update.effective_user.id
+    prefs = get_prefs(uid)
+    lang = prefs.get("lang", "en")
+
+    # basic menus
+    if data == "menu:root":
+        await safe_edit_text(q,
+            "Back to menu." if lang != "ru" else "Возврат в меню.",
+            reply_markup=root_menu(lang))
+        return
+
+    if data == "menu:lang":
+        await safe_edit_text(q,
+            "Choose language / Выбери язык:",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("English", callback_data="set_lang:en"),
+                 InlineKeyboardButton("Русский", callback_data="set_lang:ru")]
+            ]))
+        return
+
+    if data.startswith("set_lang:"):
+        lang_new = data.split(":")[1]
+        prefs["lang"] = lang_new
+        await log_event(context, "lang_set", uid, {"lang": lang_new})
+        msg = "Language set to English." if lang_new == "en" else "Язык изменён на русский."
+        await safe_edit_text(q, msg, reply_markup=root_menu(lang_new))
+        return
+
+    if data == "menu:help":
+        txt = HELP_TEXT_RU if lang == "ru" else HELP_TEXT_EN
+        await safe_edit_text(q, txt, reply_markup=root_menu(lang))
+        await log_event(context, "help_open", uid, {})
+        return
+
+    # --- answer MCQ ---
+    if data.startswith("ans:"):
+        st = context.user_data.get("practice")
+        if not st:
+            return await safe_edit_text(q, "No active quiz.")
+        ch = data.split(":")[1]
+        qitem = st["items"][st["idx"]]
+        correct = qitem["answer"]
+
+        if ch == correct:
+            st["score"] += 1
+            msg = "✅ Correct!" if lang != "ru" else "✅ Верно!"
+        else:
+            msg = f"❌ Correct answer: {correct}" if lang != "ru" else f"❌ Правильный ответ: {correct}"
+        await safe_edit_text(q, msg)
+
+        st["idx"] += 1
+        if st["idx"] >= len(st["items"]):
+            dummy = Update(update.update_id, message=q.message)
+            await practice_summary(dummy, context)
+        else:
+            await send_practice_item(q, context)
+        return
+
+    # --- handle nudge quiz skip/start ---
+    if data == "nudge:start":
+        prefs = get_prefs(uid)
+        items = await build_mcq("English basics", lang, prefs["cefr"], flavor="generic")
+        context.user_data["practice"] = {
+            "type": "mcq", "topic": "nudge", "items": items[:2],
+            "idx": 0, "score": 0, "ui_lang": lang, "scope": "free"
+        }
+        await log_event(context, "nudge_practice_start", uid, {"count": len(items[:2])})
+        return await send_practice_item(q, context)
+
+    if data == "nudge:skip":
+        await safe_edit_text(q, "No problem! Let's continue 😊" if lang != "ru" else "Хорошо! Продолжим 😊")
+        return
+
+# =========================================================
 # 14) CALLBACK HANDLER (INLINE BUTTONS)
 # =========================================================
 def increment_nudge_counter(context):
