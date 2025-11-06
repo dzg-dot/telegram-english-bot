@@ -200,23 +200,30 @@ async def back_to_menu(update_or_query, context: ContextTypes.DEFAULT_TYPE, lang
 # =========================================================
 # 7) UI MENUS & HELP
 # =========================================================
+# =========================================================
+# MAIN MENU (UNIFIED)
+# =========================================================
 def main_menu(lang="en") -> InlineKeyboardMarkup:
     if lang == "ru":
         kb = [
-            [InlineKeyboardButton("🌐 Язык", callback_data="menu:lang"),
-             InlineKeyboardButton("🏫 Класс", callback_data="menu:grade")],
             [InlineKeyboardButton("⚙️ Грамматика", callback_data="menu:grammar"),
-             InlineKeyboardButton("📖 Чтение", callback_data="menu:reading")],
-            [InlineKeyboardButton("💬 Разговор", callback_data="menu:talk")],
+             InlineKeyboardButton("📚 Слова", callback_data="menu:vocab")],
+            [InlineKeyboardButton("📖 Чтение", callback_data="menu:reading"),
+             InlineKeyboardButton("💬 Разговор", callback_data="menu:talk")],
+            [InlineKeyboardButton("📝 Практика", callback_data="menu:practice")],
+            [InlineKeyboardButton("🏫 Класс", callback_data="menu:grade"),
+             InlineKeyboardButton("🌐 Язык", callback_data="menu:lang")],
             [InlineKeyboardButton("❓ Помощь", callback_data="menu:help")]
         ]
     else:
         kb = [
-            [InlineKeyboardButton("🌐 Language", callback_data="menu:lang"),
-             InlineKeyboardButton("🏫 Grade", callback_data="menu:grade")],
             [InlineKeyboardButton("⚙️ Grammar", callback_data="menu:grammar"),
-            [InlineKeyboardButton("📖 Reading", callback_data="menu:reading")],
+             InlineKeyboardButton("📚 Vocabulary", callback_data="menu:vocab")],
+            [InlineKeyboardButton("📖 Reading", callback_data="menu:reading"),
              InlineKeyboardButton("💬 Talk", callback_data="menu:talk")],
+            [InlineKeyboardButton("📝 Practice", callback_data="menu:practice")],
+            [InlineKeyboardButton("🏫 Grade", callback_data="menu:grade"),
+             InlineKeyboardButton("🌐 Language", callback_data="menu:lang")],
             [InlineKeyboardButton("❓ Help", callback_data="menu:help")]
         ]
     return InlineKeyboardMarkup(kb)
@@ -599,24 +606,13 @@ async def on_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     # --- GRADE PROMPT AFTER LANGUAGE SELECTION ---
     if data.startswith("set_lang:"):
-        lang = data.split(":")[1]
+        lang = data.split(":", 1)[1]
         prefs["lang"] = lang
-        txt = "Language set to English." if lang == "en" else "Язык установлен: Русский."
-    
-        # ✅ Reset trạng thái để sẵn sàng sử dụng
-        prefs["mode"] = "chat"
-        context.user_data.pop("reading_input", None)
-        context.user_data.pop("practice", None)
-        context.user_data.pop("talk", None)
-
-        # ✅ Hiển thị menu chính luôn (như code cũ)
-        try:
-            await safe_edit_text(q, txt, reply_markup=main_menu(lang))
-        except Exception:
-            await safe_reply_message(update.callback_query.message, txt, reply_markup=main_menu(lang))
-    
+        txt = "Language set to EN." if lang=="en" else "Язык: Русский."
+        await safe_edit_text(q, txt, reply_markup=main_menu(lang))
         await log_event(context, "lang_set", uid, {"lang": lang})
         return
+
 
 
     # --- GRADE SELECT ---
@@ -701,6 +697,9 @@ async def on_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # --- VOCAB PRACTICE CALLBACK ---
     if data == "vocab:practice":
         word = (context.user_data.get("last_word") or "").strip()
+        items = await build_mcq(word, prefs["lang"], prefs["cefr"], flavor="vocab_syn")
+        logger.info(f"DEBUG: build_mcq returned {len(items)} items for word={word}")
+
         if not word:
             return await safe_edit_text(q,
                 "Please define or search a word first."
