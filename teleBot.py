@@ -544,9 +544,22 @@ async def on_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # --- MENU ROOT ---
     if data == "menu:root":
-        await safe_edit_text(q, "Back to main menu." if lang!="ru" else "Возврат в меню.",
-                             reply_markup=main_menu(lang))
+        # ✅ reset trạng thái trước
+        prefs["mode"] = "chat"
+        context.user_data.pop("reading_input", None)
+        context.user_data.pop("practice", None)
+        context.user_data.pop("talk", None)
+
+        # ✅ hiển thị menu chính
+        msg = "Back to main menu." if lang != "ru" else "Возврат в меню."
+        try:
+            await safe_edit_text(q, msg, reply_markup=main_menu(lang))
+        except Exception:
+            await safe_reply_message(update.callback_query.message, msg, reply_markup=main_menu(lang))
+    
+        await log_event(context, "menu_root", uid, {"lang": lang})
         return
+
 
     # --- LANGUAGE SELECT ---
     if data == "menu:lang":
@@ -592,11 +605,17 @@ async def on_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
             prefs["cefr"] = GRADE_TO_CEFR[g]
             txt = (f"Grade set to {g} (level {prefs['cefr']})."
                    if lang != "ru" else f"Класс {g} (уровень {prefs['cefr']}).")
-            # 🩹 PATCH: tự động trở lại menu chính
+            # 🩹 PATCH: reset trạng thái và tự động quay lại menu
+            prefs["mode"] = "chat"
+            context.user_data.pop("reading_input", None)
+            context.user_data.pop("practice", None)
+            context.user_data.pop("talk", None)
+
             try:
                 await safe_edit_text(q, txt, reply_markup=main_menu(lang))
             except Exception:
                 await safe_reply_message(update.callback_query.message, txt, reply_markup=main_menu(lang))
+
             await log_event(context, "grade_set", uid, {"grade": g, "cefr": prefs["cefr"]})
             return
 
