@@ -592,8 +592,9 @@ async def on_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
             prefs["cefr"] = GRADE_TO_CEFR[g]
             txt = (f"Grade set to {g} (level {prefs['cefr']})."
                    if lang != "ru" else f"Класс {g} (уровень {prefs['cefr']}).")
+            # 🩹 PATCH: tự động trở lại menu chính
             await safe_edit_text(q, txt, reply_markup=main_menu(lang))
-            await log_event(context, "grade_set", uid, {"grade": g})
+            await log_event(context, "grade_set", uid, {"grade": g, "cefr": prefs["cefr"]})
         return
 
     # --- GRAMMAR MENU ---
