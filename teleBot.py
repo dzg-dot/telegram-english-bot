@@ -170,6 +170,31 @@ async def safe_edit_text(query, text: str, reply_markup=None):
             return await query.edit_message_text(trim(text))
         except Exception as e:
             logger.warning("safe_edit_text failed: %s", e)
+# =========================================================
+# PATCH 1: UNIVERSAL BACK TO MENU
+# =========================================================
+async def back_to_menu(update_or_query, context: ContextTypes.DEFAULT_TYPE, lang="en"):
+    """Reset session state and return to main menu safely."""
+    prefs = get_prefs(update_or_query.effective_user.id if hasattr(update_or_query, "effective_user") else 0)
+    prefs["mode"] = "chat"
+    context.user_data.pop("reading_input", None)
+    context.user_data.pop("practice", None)
+    context.user_data.pop("talk", None)
+    msg = "Back to main menu." if lang != "ru" else "Возврат в меню."
+    try:
+        if hasattr(update_or_query, "callback_query"):
+            q = update_or_query.callback_query
+            await safe_edit_text(q, msg, reply_markup=main_menu(lang))
+        else:
+            await safe_reply_message(update_or_query.message, msg, reply_markup=main_menu(lang))
+    except Exception as e:
+        logger.warning(f"back_to_menu failed: {e}")
+        try:
+            await safe_reply_message(update_or_query.message, msg, reply_markup=main_menu(lang))
+        except Exception:
+            pass
+    await log_event(context, "menu_return", update_or_query.effective_user.id if hasattr(update_or_query, "effective_user") else "n/a", {"lang": lang})
+
 
 
 # =========================================================
@@ -501,6 +526,9 @@ async def practice_summary(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Footer theo nguồn
     scope = st.get("scope", "free")
     await safe_reply_message(update.message, "—", reply_markup=practice_footer_kb(scope, lang))
+    # cho phép học sinh quay lại menu trực tiếp
+    await safe_reply_message(update.message, "🏠 Back to menu", reply_markup=main_menu(lang))
+
 
     # --- BADGE SYSTEM ---
     rate = score / max(total, 1)
@@ -571,19 +599,25 @@ async def on_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     # --- GRADE PROMPT AFTER LANGUAGE SELECTION ---
     if data.startswith("set_lang:"):
-        new_lang = data.split(":")[1]
-        prefs["lang"] = new_lang
-        msg = "Language set! Please select your grade:" if new_lang=="en" else "Язык выбран! Теперь выбери класс:"
-        kb = InlineKeyboardMarkup([
-            [InlineKeyboardButton("6", callback_data="set_grade:6"),
-             InlineKeyboardButton("7", callback_data="set_grade:7"),
-             InlineKeyboardButton("8", callback_data="set_grade:8"),
-             InlineKeyboardButton("9", callback_data="set_grade:9"),
-             InlineKeyboardButton("10", callback_data="set_grade:10")],
-        ])
-        await safe_edit_text(q, msg, reply_markup=kb)
-        await log_event(context, "lang_set", uid, {"lang": new_lang})
+        lang = data.split(":")[1]
+        prefs["lang"] = lang
+        txt = "Language set to English." if lang == "en" else "Язык установлен: Русский."
+    
+        # ✅ Reset trạng thái để sẵn sàng sử dụng
+        prefs["mode"] = "chat"
+        context.user_data.pop("reading_input", None)
+        context.user_data.pop("practice", None)
+        context.user_data.pop("talk", None)
+
+        # ✅ Hiển thị menu chính luôn (như code cũ)
+        try:
+            await safe_edit_text(q, txt, reply_markup=main_menu(lang))
+        except Exception:
+            await safe_reply_message(update.callback_query.message, txt, reply_markup=main_menu(lang))
+    
+        await log_event(context, "lang_set", uid, {"lang": lang})
         return
+
 
     # --- GRADE SELECT ---
     if data == "menu:grade":
@@ -617,6 +651,7 @@ async def on_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await safe_reply_message(update.callback_query.message, txt, reply_markup=main_menu(lang))
 
             await log_event(context, "grade_set", uid, {"grade": g, "cefr": prefs["cefr"]})
+            await back_to_menu(update, context, lang)
             return
 
     # --- GRAMMAR MENU ---
@@ -665,10 +700,21 @@ async def on_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     # --- VOCAB PRACTICE CALLBACK ---
     if data == "vocab:practice":
-        word = context.user_data.get("last_word", "study")
-        items = await build_mcq(word, prefs["lang"], prefs["cefr"], flavor="vocab_syn")
+        word = (context.user_data.get("last_word") or "").strip()
+        if not word:
+            return await safe_edit_text(q,
+                "Please define or search a word first."
+                if lang != "ru" else "Сначала найди слово.",
+                reply_markup=main_menu(lang)
+            )  
+
+        # ✅ Tạo 3 câu quiz về từ đang học
+        items = await build_mcq(word, lang, prefs["cefr"], flavor="vocab_syn")
+        items = items[:3] if len(items) > 3 else items
+
         if not items:
             return await safe_edit_text(q, "⚠️ No quiz found.", reply_markup=main_menu(lang))
+
         context.user_data["practice"] = {
             "type": "mcq",
             "topic": word,
@@ -676,10 +722,11 @@ async def on_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "idx": 0,
             "score": 0,
             "ui_lang": lang,
-            "scope": "vocab"
+            "scope": "vocab",
+            "retry": False
         }
         await send_practice_item(q, context)
-        await log_event(context, "vocab_practice_start", uid, {"word": word})
+        await log_event(context, "vocab_practice_start", uid, {"word": word, "count": len(items)})
         return
 # --- READING GLOSS ---
     if data == "reading:gloss":
@@ -744,12 +791,16 @@ async def on_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
         idx = st["idx"]
         qitem = st["items"][idx]
         correct = qitem["answer"]
+        ui_lang = st.get("ui_lang", "en")
 
+        # Retry logic
         if ch == correct:
             st["score"] += 1
-            st["idx"] += 1
-            await safe_edit_text(q, "✅ Correct!")
+            st["retry"] = False
+            msg = "✅ Correct!" if ui_lang != "ru" else "✅ Верно!"
+            await safe_edit_text(q, msg)
             await asyncio.sleep(1)
+            st["idx"] += 1
             if st["idx"] >= len(st["items"]):
                 dummy = Update(update.update_id, message=q.message)
                 await practice_summary(dummy, context)
@@ -757,22 +808,24 @@ async def on_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await send_practice_item(q, context)
             return
         else:
-            retry_count = st.get("retry", 0)
-            if retry_count < 1:
-                st["retry"] = retry_count + 1
-                await safe_edit_text(q, "❌ Try again! Choose once more.")
-                await send_practice_item(q, context)
+            # Nếu lần đầu sai → cho chọn lại
+            if not st.get("retry"):
+                st["retry"] = True
+                msg = "❌ Try again!" if ui_lang != "ru" else "❌ Попробуй ещё раз!"
+                return await safe_edit_text(q, msg, reply_markup=mcq_buttons(qitem["options"]))
+            # Nếu sai lần 2 → hiển thị đáp án và chuyển câu
             else:
-                await safe_edit_text(q, f"❌ Correct answer: {correct}")
-                st["idx"] += 1
-                st["retry"] = 0
+                msg = f"The correct answer is {correct}." if ui_lang != "ru" else f"Правильный ответ: {correct}."
+                st["retry"] = False
+                await safe_edit_text(q, msg)
                 await asyncio.sleep(1)
+                st["idx"] += 1
                 if st["idx"] >= len(st["items"]):
                     dummy = Update(update.update_id, message=q.message)
                     await practice_summary(dummy, context)
                 else:
                     await send_practice_item(q, context)
-        return
+                return
 # --- HELP MENU CALLBACK ---
     if data == "menu:help":
         txt = HELP_TEXT_RU if lang == "ru" else HELP_TEXT_EN
@@ -828,15 +881,23 @@ from PIL import Image
 import io
 
 async def extract_text_from_image(file_obj):
-    """Download telegram photo and run OCR to extract English text."""
+    """Use OCR.Space API instead of pytesseract for Render compatibility."""
     try:
         bio = io.BytesIO()
         await file_obj.download_to_memory(out=bio)
-        img = Image.open(bio)
-        text = pytesseract.image_to_string(img, lang="eng")
+        bio.seek(0)
+        files = {'file': ('image.jpg', bio, 'image/jpeg')}
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            r = await client.post(
+                "https://api.ocr.space/parse/image",
+                data={"language": "eng", "isOverlayRequired": False},
+                files=files
+            )
+        data = r.json()
+        text = data.get("ParsedResults", [{}])[0].get("ParsedText", "")
         return text.strip()
     except Exception as e:
-        logger.warning(f"OCR failed: {e}")
+        logger.warning(f"OCR API failed: {e}")
         return ""
 
 # =========================================================
