@@ -399,6 +399,8 @@ async def back_to_menu(update_or_query, context, lang="en"):
                              msg, reply_markup=root_menu(lang))
 
 # =========================================================
+
+# =========================================================
 # 13) CALLBACK HANDLER (INLINE BUTTONS)
 # =========================================================
 async def on_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -410,16 +412,16 @@ async def on_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
     prefs = get_prefs(uid)
     lang = prefs.get("lang", "en")
 
-    # basic menus
+    # --- menu root ---
     if data == "menu:root":
         await safe_edit_text(q,
             "Back to menu." if lang != "ru" else "Возврат в меню.",
             reply_markup=root_menu(lang))
         return
 
+    # --- language menu ---
     if data == "menu:lang":
-        await safe_edit_text(q,
-            "Choose language / Выбери язык:",
+        await safe_edit_text(q, "Choose language / Выбери язык:",
             reply_markup=InlineKeyboardMarkup([
                 [InlineKeyboardButton("English", callback_data="set_lang:en"),
                  InlineKeyboardButton("Русский", callback_data="set_lang:ru")]
@@ -431,13 +433,58 @@ async def on_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
         prefs["lang"] = lang_new
         await log_event(context, "lang_set", uid, {"lang": lang_new})
         msg = "Language set to English." if lang_new == "en" else "Язык изменён на русский."
-        await safe_edit_text(q, msg, reply_markup=root_menu(lang_new))
+        await safe_edit_text(q, msg + "\n\nChoose an option below 👇",
+                             reply_markup=root_menu(lang_new))
         return
 
+    # --- help ---
     if data == "menu:help":
         txt = HELP_TEXT_RU if lang == "ru" else HELP_TEXT_EN
-        await safe_edit_text(q, txt, reply_markup=root_menu(lang))
+        kb = InlineKeyboardMarkup([
+            [InlineKeyboardButton("⬅️ Back", callback_data="menu:root")]
+        ])
+        await safe_edit_text(q, txt, reply_markup=kb)
         await log_event(context, "help_open", uid, {})
+        return
+
+    # --- grade selection ---
+    if data == "menu:grade":
+        txt = "Choose your grade:" if lang != "ru" else "Выбери свой класс:"
+        await safe_edit_text(q, txt, reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("6", callback_data="set_grade:6"),
+             InlineKeyboardButton("7", callback_data="set_grade:7"),
+             InlineKeyboardButton("8", callback_data="set_grade:8"),
+             InlineKeyboardButton("9", callback_data="set_grade:9")],
+            [InlineKeyboardButton("⬅️ Back", callback_data="menu:root")]
+        ]))
+        return
+
+    if data.startswith("set_grade:"):
+        g = data.split(":")[1]
+        if g in GRADE_TO_CEFR:
+            prefs["grade"] = g
+            prefs["cefr"] = GRADE_TO_CEFR[g]
+            msg = (f"Grade set to {g} (level {prefs['cefr']})."
+                   if lang != "ru" else f"Класс {g} (уровень {prefs['cefr']}).")
+            await safe_edit_text(q, msg, reply_markup=root_menu(lang))
+            await log_event(context, "grade_set", uid, {"grade": g})
+        return
+
+    # --- mode: practice ---
+    if data == "menu:mode:practice":
+        txt = "Send a topic or word to practice!" if lang != "ru" else "Отправь тему или слово для практики!"
+        await safe_edit_text(q, txt, reply_markup=root_menu(lang))
+        prefs["mode"] = "practice"
+        await log_event(context, "mode_set", uid, {"mode": "practice"})
+        return
+
+    # --- mode: talk ---
+    if data == "menu:mode:talk":
+        prefs["mode"] = "talk"
+        context.user_data["talk"] = {"topic": "daily life", "turns": 0}
+        txt = "Let's talk! What do you like to do after school?" if lang != "ru" else "Поговорим! Чем ты любишь заниматься после школы?"
+        await safe_edit_text(q, txt, reply_markup=root_menu(lang))
+        await log_event(context, "talk_start", uid, {})
         return
 
     # --- answer MCQ ---
@@ -464,42 +511,41 @@ async def on_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await send_practice_item(q, context)
         return
 
-    # --- handle nudge quiz skip/start ---
+    # --- nudge mini quiz ---
     if data == "nudge:start":
-        prefs = get_prefs(uid)
         items = await build_mcq("English basics", lang, prefs["cefr"], flavor="generic")
         context.user_data["practice"] = {
             "type": "mcq", "topic": "nudge", "items": items[:2],
             "idx": 0, "score": 0, "ui_lang": lang, "scope": "free"
         }
-        await log_event(context, "nudge_practice_start", uid, {"count": len(items[:2])})
+        await log_event(context, "nudge_practice_start", uid, {"count": 2})
         return await send_practice_item(q, context)
 
     if data == "nudge:skip":
         await safe_edit_text(q, "No problem! Let's continue 😊" if lang != "ru" else "Хорошо! Продолжим 😊")
         return
+# =========================================================
+
 
 # =========================================================
-# 14) CALLBACK HANDLER (INLINE BUTTONS)
+# 14) NUDGE & REWARD HELPERS
 # =========================================================
 def increment_nudge_counter(context):
-    count = context.user_data.get("nudge_count", 0) + 1
-    context.user_data["nudge_count"] = count
-    return count
+    c = context.user_data.get("nudge_count", 0) + 1
+    context.user_data["nudge_count"] = c
+    return c
 
 def reset_nudge_counter(context):
     context.user_data["nudge_count"] = 0
 
 async def maybe_send_nudge(update, context, lang="en"):
-    count = increment_nudge_counter(context)
-    if count >= 3:
+    c = increment_nudge_counter(context)
+    if c >= 3:
         reset_nudge_counter(context)
-        msg = ("Do you want a quick 2-question mini-quiz? (≤1 min)"
-               if lang != "ru"
-               else "Хочешь мини-викторину из 2 вопросов? (≤1 мин)")
+        msg = "Do you want a quick 2-question mini-quiz? (≤1 min)" if lang != "ru" else "Хочешь мини-викторину из 2 вопросов?"
         kb = InlineKeyboardMarkup([
             [InlineKeyboardButton("▶️ Start", callback_data="nudge:start"),
-             InlineKeyboardButton("⏭ Skip",  callback_data="nudge:skip")]
+             InlineKeyboardButton("⏭ Skip", callback_data="nudge:skip")]
         ])
         await safe_reply_message(update.message, msg, reply_markup=kb)
         await log_event(context, "nudge_trigger", update.effective_user.id, {})
@@ -512,24 +558,23 @@ async def reward_message(update, context, score, total, lang="en"):
     else:
         msg = "👏 Nice effort!" if lang != "ru" else "👏 Хорошая попытка!"
     await safe_reply_message(update.message, msg,
-                             reply_markup=InlineKeyboardMarkup(
-                                 [[InlineKeyboardButton("🏠 Menu" if lang!="ru" else "🏠 Меню",
-                                                         callback_data="menu:root")]]))
+        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🏠 Menu", callback_data="menu:root")]]))
     await log_event(context, "reward_given", update.effective_user.id,
-                    {"score": score, "total": total})
+        {"score": score, "total": total})
+# =========================================================
+
 
 # =========================================================
-# 15) FREE TEXT HANDLER (chat-first)
+# 15) FREE TEXT HANDLER (chat-first + intent detector)
 # =========================================================
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = (update.message.text or "").strip()
     if not text:
         return
 
-    # 1️⃣ Safety check
     if blocked(text):
         return await safe_reply_message(update.message,
-            "⛔ Let's keep our chat school-friendly and about English learning.")
+            "⛔ Please keep messages about English learning only.")
 
     uid = update.effective_user.id
     prefs = get_prefs(uid)
@@ -537,15 +582,14 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if lang == "auto":
         lang = detect_lang(text)
 
-    # 2️⃣ Intent detection
     t_low = text.lower()
-    # quick dictionary search
-    if len(t_low.split()) == 1 and t_low.isalpha():
+
+    # --- INTENT DETECTION ---
+    if len(t_low.split()) <= 2:
         intent = "vocab"
         headword = t_low
     elif re.search(r"\bdefine\b|\bmeaning of\b", t_low):
-        intent = "vocab"
-        headword = re.sub(r".*\b(?:define|meaning of)\b", "", t_low).strip()
+        intent = "vocab"; headword = re.sub(r".*\b(?:define|meaning of)\b", "", t_low).strip()
     elif re.search(r"\bgrammar\b|\bexplain\b|\brule\b", t_low):
         intent = "grammar"
     elif re.search(r"\bwrite a short text\b|\bread(?:ing)?\b", t_low):
@@ -559,7 +603,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         intent = "chat"
 
-    # 3️⃣ Route by intent
+    # --- ROUTE ACTION ---
     if intent == "vocab":
         reset_nudge_counter(context)
         card = await build_vocab_card(headword, prefs)
@@ -577,9 +621,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         reset_nudge_counter(context)
         topic = text.strip()
         g_prompt = (
-            f"Explain the grammar point '{topic}' for level {prefs['cefr']} "
-            "(grades 6–9) with 5–7 bullets, ✓/✗ examples and signal words. "
-            "If UI is Russian, add short Russian hints in parentheses."
+            f"Explain '{topic}' for level {prefs['cefr']} (A2–B1). "
+            "5–7 bullets, ✓/✗ examples, signal words. "
+            "If UI is Russian, add short hints in parentheses."
         )
         exp = await ask_openai(
             [{"role": "system", "content": POLICY_STUDY},
@@ -621,11 +665,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if intent == "talk":
         reset_nudge_counter(context)
-        topic = "school life"
-        context.user_data["talk"] = {"topic": topic, "turns": 0}
-        opener = "Let's talk! How are you today?" if lang != "ru" else "Поговорим! Как дела?"
-        await safe_reply_message(update.message, f"Topic: {topic}\n\n{opener}")
-        await log_event(context, "talk_start", uid, {})
+        reply = await talk_reply(text, "school life", lang)
+        await safe_reply_message(update.message, trim(reply),
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🏠 Menu", callback_data="menu:root")]]))
+        await log_event(context, "talk_message", uid, {"chars": len(text)})
         return
 
     if intent == "practice":
@@ -638,15 +681,15 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await log_event(context, "practice_start", uid, {"count": len(items)})
         return await send_practice_item(update, context)
 
-    # default chat (encouraging)
+    # default chat
     msg = [{"role": "system", "content": POLICY_CHAT},
            {"role": "user", "content": text}]
     reply = await ask_openai(msg, max_tokens=300)
-    kb = InlineKeyboardMarkup(
-        [[InlineKeyboardButton("🏠 Menu", callback_data="menu:root")]])
+    kb = InlineKeyboardMarkup([[InlineKeyboardButton("🏠 Menu", callback_data="menu:root")]])
     await safe_reply_message(update.message, trim(reply), reply_markup=kb)
     await log_event(context, "chat_message", uid, {"chars": len(text)})
     await maybe_send_nudge(update, context, lang)
+# =========================================================
 
 # =========================================================
 # 16) FLASK HEALTHCHECK
