@@ -45,7 +45,7 @@ LOG_SALT = os.getenv("LOG_SALT", "").strip()
 if not TELEGRAM_TOKEN:
     raise RuntimeError("TELEGRAM_TOKEN missing")
 
-httpx_client = httpx.Client(timeout=httpx.Timeout(connect=30.0, read=90.0))
+httpx_client = httpx.Client(timeout=httpx.Timeout(connect=30.0, read=90.0, write=90.0, pool=90.0))
 client = OpenAI(
     base_url="https://openrouter.ai/api/v1",
     api_key=OR_KEY,
