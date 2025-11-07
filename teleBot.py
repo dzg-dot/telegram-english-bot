@@ -1263,56 +1263,32 @@ async def maybe_nudge(update, context, lang):
 # =========================================================
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = (update.message.text or "").strip()
-    if not text: return
-# --- AUTO GRAMMAR HINT (Patch 11) ---
-    grammar_hints = [
-        (r"\b(am|is|are)\s+\w+ing\b", "Present Continuous — be + V-ing for actions happening now."),
-        (r"\b(was|were)\s+\w+ing\b", "Past Continuous — was/were + V-ing for actions in progress in the past."),
-        (r"\b(has|have)\s+\w+(ed|en)\b", "Present Perfect — have/has + V3 for experiences or recent results."),
-        (r"\bhad\s+\w+(ed|en)\b", "Past Perfect — had + V3 for actions before another past."),
-        (r"\bwill\s+\w+\b", "Future Simple — will + base verb for future predictions."),
-        (r"\b(am|is|are|was|were|been|be)\s+\w+(ed|en)\b", "Passive Voice — be + V3 (object focus)."),
-        (r"\b(should|must|can|could|may|might|shall|will|would)\b", "Modal verbs — use base form after modal."),
-        (r"\bif\b.*\bwill\b", "First Conditional — If + Present, will + V."),
-        (r"\bif\b.*\bwould\b", "Second Conditional — If + Past, would + V."),
-        (r"\bif\b.*\bhad\b", "Third Conditional — If + Past Perfect, would have + V3."),
-        (r"\b(er than|more .+ than)\b", "Comparatives — adjective + than."),
-        (r"\b(the .+est|the most)\b", "Superlatives — the + adj-est / the most + adjective."),
-    ]
-    for pattern, hint in grammar_hints:
-        if re.search(pattern, text, re.I):
-            await safe_reply_message(update.message, f"💡 Grammar hint: {hint}")
-            await log_event(context, "grammar_hint", update.effective_user.id, {"hint": hint})
-            break
-
-# =========================================================
-# PATCH 10: AUTO-GLOSS & SMART GRAMMAR GUIDANCE
-# =========================================================
-    # 1️⃣ Auto Gloss trigger for long English text
-    word_count = len(re.findall(r"[A-Za-z]+", text))
-    if word_count >= 60 and not re.search(r"\b(translate|gloss)\b", text, re.I):
-        msg = ("This looks like a reading passage. Would you like me to gloss it?"
-               if detect_lang(text) == "en"
-               else "Похоже, это английский текст. Сделать глоссы?")
-        kb = InlineKeyboardMarkup([
-            [InlineKeyboardButton("📝 Gloss it", callback_data="reading:auto_gloss"),
-             InlineKeyboardButton("⏭ Skip", callback_data="nudge:skip")]
-        ])
-        context.user_data["auto_gloss_text"] = text
-        await safe_reply_message(update.message, msg, reply_markup=kb)
-        await log_event(context, "auto_gloss_offer", update.effective_user.id, {"words": word_count})
+    if not text:
         return
 
-    # 2️⃣ Smart Grammar detector for textbook-style exercises
-    if re.search(r"\b(fill in|underline|choose|complete|correct)\b", text.lower()):
-        msg = ("It looks like a grammar exercise. "
-               "I can guide you step by step instead of giving direct answers. "
-               "What grammar topic is this about?")
-        await safe_reply_message(update.message, msg)
-        await log_event(context, "textbook_ex_detected", update.effective_user.id, {"text": text[:80]})
-        return
+    # ✅ 1. Luôn khởi tạo prefs + lang sớm để tránh lỗi UnboundLocalError
+    uid = update.effective_user.id
+    prefs = get_prefs(uid)
+    lang = prefs.get("lang", "en")
+    if lang == "auto":
+        lang = detect_lang(text)
 
-   # --- TALK CONTEXT CONTINUE ---
+    # ✅ 2. Xác định intent sớm, trước khi xử lý grammar hint
+    t = text.lower()
+    intent = "chat"
+    if re.search(r"\bdefine\b|\bmeaning of\b", t):
+        intent = "vocab"
+    elif re.search(r"\bgrammar\b|\btense\b|\bexplain\b|\brule\b", t):
+        intent = "grammar"
+    elif re.search(r"\btalk\b|\bconversation\b|\bspeak\b", t):
+        intent = "talk"
+    elif re.search(r"\bread\b|\btext\b|\bwrite\b|\btranslate\b|\bgloss\b", t):
+        intent = "reading"
+    elif re.search(r"\bquiz\b|\bpractice\b|\bexercise\b", t):
+        intent = "practice"
+
+
+       # --- TALK CONTEXT CONTINUE ---
     if prefs.get("mode") == "talk" or "talk" in context.user_data:
         talk_state = context.user_data.get("talk", {"topic": "general", "turns": 0})
         topic = talk_state.get("topic", "daily life")
@@ -1328,9 +1304,37 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
 
         # --- Trả lời hội thoại ---
-        reply = await talk_reply(user_text, topic, lang)
+        try:
+            reply = await talk_reply(user_text, topic, lang)
+        except Exception as e:
+            logger.warning(f"talk_reply failed: {e}")
+            reply = "Hmm, could you repeat that?"
+
         talk_state["turns"] += 1
+        prefs["mode"] = "talk"  # đảm bảo vẫn ở chế độ hội thoại
         context.user_data["talk"] = talk_state
+
+        # --- Lời khen nhẹ mỗi 5 lượt ---
+        if talk_state["turns"] % 5 == 0:
+            encouragement = random.choice([
+                "You're doing great! Tell me more!",
+                "Nice! Could you give an example?",
+                "That’s interesting — keep going!",
+                "Great effort! Keep speaking English!",
+            ])
+            await safe_reply_message(update.message, encouragement)
+
+        # --- Nhắc nhở nhẹ sau 10 lượt ---
+        if talk_state["turns"] == 10:
+            msg_warn = (
+                "⚠️ Reminder: I'm an AI tutor and may make mistakes. "
+                "Please double-check important information."
+                if lang != "ru" else
+                "⚠️ Напоминание: я искусственный интеллект и могу ошибаться. "
+                "Проверяй важные сведения."
+            )
+            await safe_reply_message(update.message, msg_warn)
+
 
         # --- Nếu trò chuyện đủ dài, gợi ý kết thúc ---
         if talk_state["turns"] >= 20:
@@ -1357,12 +1361,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return await safe_reply_message(update.message,
             "⛔ Please keep it school-appropriate. Try an English topic.")
 
-    uid = update.effective_user.id
-    prefs = get_prefs(uid)
-    lang = prefs.get("lang", "en")
-    if lang == "auto":
-        lang = detect_lang(text)
-
 
     # GREETING DETECTION
     if re.fullmatch(r"hi|hello|hey|привет|здравствуй", text.lower()):
@@ -1370,15 +1368,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                if lang!="ru" else "Привет! Я твой помощник по английскому. Задай вопрос о языке!")
         return await safe_reply_message(update.message, msg, reply_markup=main_menu(lang))
 
-    # --- INTENT DETECTION ---
-    t = text.lower()
-    intent = "chat"
-    if re.search(r"\bdefine\b|\bmeaning of\b|\bwhat does\b|\bmean\b", t): intent = "vocab"
-    elif re.search(r"\bgrammar\b|\btense\b|\bexplain\b|\brule\b", t): intent = "grammar"
-    elif re.search(r"\btalk\b|\bconversation\b|\bspeak\b", t): intent = "talk"        # 👈 move up
-    elif re.search(r"\bread\b|\btext\b|\bwrite\b|\btranslate\b|\bgloss\b", t): intent = "reading"
-    elif re.search(r"\bquiz\b|\bpractice\b|\bexercise\b", t): intent = "practice"
-
+  
 
     # --- VOCABULARY ---
     if intent == "vocab":
@@ -1547,12 +1537,56 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await log_event(context, "practice_start", uid, {"topic": text, "count": len(items)})
         return
 
-
-    # --- DEFAULT CHAT ---
-    msgs = [
-        {"role": "system", "content": POLICY_CHAT},
-        {"role": "user", "content": text}
+# --- AUTO GRAMMAR HINT (Patch 11) ---
+    grammar_hints = [
+        (r"\b(am|is|are)\s+\w+ing\b", "Present Continuous — be + V-ing for actions happening now."),
+        (r"\b(was|were)\s+\w+ing\b", "Past Continuous — was/were + V-ing for actions in progress in the past."),
+        (r"\b(has|have)\s+\w+(ed|en)\b", "Present Perfect — have/has + V3 for experiences or recent results."),
+        (r"\bhad\s+\w+(ed|en)\b", "Past Perfect — had + V3 for actions before another past."),
+        (r"\bwill\s+\w+\b", "Future Simple — will + base verb for future predictions."),
+        (r"\b(am|is|are|was|were|been|be)\s+\w+(ed|en)\b", "Passive Voice — be + V3 (object focus)."),
+        (r"\b(should|must|can|could|may|might|shall|will|would)\b", "Modal verbs — use base form after modal."),
+        (r"\bif\b.*\bwill\b", "First Conditional — If + Present, will + V."),
+        (r"\bif\b.*\bwould\b", "Second Conditional — If + Past, would + V."),
+        (r"\bif\b.*\bhad\b", "Third Conditional — If + Past Perfect, would have + V3."),
+        (r"\b(er than|more .+ than)\b", "Comparatives — adjective + than."),
+        (r"\b(the .+est|the most)\b", "Superlatives — the + adj-est / the most + adjective."),
     ]
+    for pattern, hint in grammar_hints:
+        if re.search(pattern, text, re.I):
+            await safe_reply_message(update.message, f"💡 Grammar hint: {hint}")
+            await log_event(context, "grammar_hint", update.effective_user.id, {"hint": hint})
+            break
+
+# =========================================================
+# PATCH 10: AUTO-GLOSS & SMART GRAMMAR GUIDANCE
+# =========================================================
+    # 1️⃣ Auto Gloss trigger for long English text
+    word_count = len(re.findall(r"[A-Za-z]+", text))
+    if word_count >= 60 and not re.search(r"\b(translate|gloss)\b", text, re.I):
+        msg = ("This looks like a reading passage. Would you like me to gloss it?"
+               if detect_lang(text) == "en"
+               else "Похоже, это английский текст. Сделать глоссы?")
+        kb = InlineKeyboardMarkup([
+            [InlineKeyboardButton("📝 Gloss it", callback_data="reading:auto_gloss"),
+             InlineKeyboardButton("⏭ Skip", callback_data="nudge:skip")]
+        ])
+        context.user_data["auto_gloss_text"] = text
+        await safe_reply_message(update.message, msg, reply_markup=kb)
+        await log_event(context, "auto_gloss_offer", update.effective_user.id, {"words": word_count})
+        return
+
+    # 2️⃣ Smart Grammar detector for textbook-style exercises
+    if re.search(r"\b(fill in|underline|choose|complete|correct)\b", text.lower()):
+        msg = ("It looks like a grammar exercise. "
+               "I can guide you step by step instead of giving direct answers. "
+               "What grammar topic is this about?")
+        await safe_reply_message(update.message, msg)
+        await log_event(context, "textbook_ex_detected", update.effective_user.id, {"text": text[:80]})
+        return
+
+
+ 
     reply = await ask_openai(msgs, max_tokens=350)
     await safe_reply_message(update.message, trim(reply), reply_markup=main_menu(lang))
     await log_event(context, "chat_message", uid, {"chars": len(text)})
@@ -1608,7 +1642,30 @@ async def handle_image(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await safe_reply_message(update.message, msg)
         return
 
+    # --- Nhắc nhở định kỳ trong chế độ chat ---
+    chat_turns = context.user_data.get("chat_turns", 0) + 1
+    context.user_data["chat_turns"] = chat_turns
 
+    if chat_turns == 10:
+        warn_msg = (
+            "⚠️ Reminder: I'm an AI tutor and may make mistakes. "
+            "Please double-check important information."
+            if lang != "ru" else
+            "⚠️ Напоминание: я искусственный интеллект и могу ошибаться. "
+            "Проверяй важные сведения."
+        )
+        kb = InlineKeyboardMarkup([
+            [InlineKeyboardButton("🏠 Menu", callback_data="menu:root")]
+        ])
+        await safe_reply_message(update.message, warn_msg, reply_markup=kb)
+        context.user_data["chat_turns"] = 0  # reset sau khi nhắc
+
+
+   # --- DEFAULT CHAT ---
+    msgs = [
+        {"role": "system", "content": POLICY_CHAT},
+        {"role": "user", "content": text}
+    ]
 
 # =========================================================
 # 17) FLASK HEALTHCHECK & MAIN ENTRYPOINT
