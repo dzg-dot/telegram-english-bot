@@ -403,24 +403,35 @@ async def build_reading_passage(topic: str, prefs: dict) -> str:
     return await ask_openai(msgs, max_tokens=260)
 
 
-# --- Reading Gloss Builder ---
-async def build_reading_gloss(text: str, ui_lang: str):
-    target = "Russian" if ui_lang != "ru" else "English"
+# --- Reading Gloss Builder (supports translated gloss) ---
+async def build_reading_gloss(text: str, ui_lang: str, translate_mode: bool = False):
+    """
+    Generate glossed English text for A2–B1+ learners.
+    If translate_mode=True, gloss meanings are generated in the *opposite* language.
+    """
+    if translate_mode:
+        # Nếu người dùng gõ "translate", dịch gloss sang ngôn ngữ còn lại
+        gloss_lang = "English" if ui_lang == "ru" else "Russian"
+    else:
+        gloss_lang = "Russian" if ui_lang != "ru" else "English"
+
     prompt = (
-        "Gloss the given English text for B1-level learners:\n"
+        f"Gloss the given English text for A2–B1+ learners:\n"
         "- Keep the original English sentences.\n"
-        "- Highlight useful English chunks such as phrasal verbs, idioms, collocations, or complex verbs.\n"
-        "- Enclose each selected chunk in angle brackets <like this> and add a short "
-        f"{target} translation in parentheses (1–3 words) right after it.\n"
+        "- Select 12–15 useful English words or phrases (phrasal verbs, idioms, collocations).\n"
+        "- Enclose each English chunk in angle brackets <like this> and immediately add a short "
+        f"{gloss_lang} translation in parentheses (1–3 words).\n"
         "- Example: She <set up> (организовала) a small company.\n"
-        "- Do NOT gloss every word; only 12–15 key expressions.\n"
-        "- Output plain text only, no markdown or lists.\n\n"
+        "- Do NOT gloss every word, and do NOT use markdown.\n\n"
         "TEXT:\n" + text
     )
-    msgs = [{"role": "system", "content": POLICY_STUDY},
-            {"role": "user", "content": prompt}]
-    return await ask_openai(msgs, max_tokens=420)
 
+    msgs = [
+        {"role": "system", "content": POLICY_STUDY},
+        {"role": "user", "content": prompt}
+    ]
+    return await ask_openai(msgs, max_tokens=420)
+ 
 # --- Talk Coach Builder ---
 async def talk_reply(user_text: str, topic: str, ui_lang: str):
     """Friendly English coach — corrects lightly and gives short tips."""
@@ -615,6 +626,13 @@ async def send_practice_item(update_or_query, context: ContextTypes.DEFAULT_TYPE
     idx = st["idx"]
     q = st["items"][idx]
     total = len(st["items"])
+
+    # ✅ Làm sạch option: xóa mọi ký tự A)/B)/1./v.v.
+    cleaned_options = [re.sub(r"^[A-Da-d)\.\s]+", "", opt.strip()) for opt in q["options"]]
+
+    txt = f"📘 Q{idx+1}/{total}\n\n{q['question']}\n\n"
+    for i, label in enumerate(["A", "B", "C", "D"]):
+        txt += f"{label}) {cleaned_options[i]}\n"
 
     # --- Build question text safely ---
     question = q.get("question", "").strip()
@@ -1232,26 +1250,6 @@ async def on_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await log_event(context, "help_open", uid, {})
         return
 
-# =========================================================
-async def extract_text_from_image(file_obj):
-    """Use OCR.Space API instead of pytesseract for Render compatibility."""
-    try:
-        bio = io.BytesIO()
-        await file_obj.download_to_memory(out=bio)
-        bio.seek(0)
-        files = {'file': ('image.jpg', bio, 'image/jpeg')}
-        async with httpx.AsyncClient(timeout=30.0) as client:
-            r = await client.post(
-                "https://api.ocr.space/parse/image",
-                data={"language": "eng", "isOverlayRequired": False},
-                files=files
-            )
-        data = r.json()
-        text = data.get("ParsedResults", [{}])[0].get("ParsedText", "")
-        return text.strip()
-    except Exception as e:
-        logger.warning(f"OCR API failed: {e}")
-        return ""
 
 # =========================================================
 # 15) TALK COACH & NUDGE SYSTEM
@@ -1365,7 +1363,51 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if lang == "auto":
         lang = detect_lang(text)
 
-    # ✅ 2. Xác định intent sớm, trước khi xử lý grammar hint
+
+        # --- OUT-OF-SCOPE FILTER (Math, Science, etc.) ---
+    out_of_scope = [
+        r"\bsolve\b", r"\bcalculate\b", r"\bhow much\b", r"\bformula\b",
+        r"\bphysics\b", r"\bchemistry\b", r"\bmath\b", r"\bgeometry\b",
+        r"\bequation\b", r"\bsquare root\b", r"\btriangle\b", r"\bvolume\b",
+        r"\bmolecule\b", r"\bchemical\b", r"\bderive\b", r"\bproof\b",
+        r"\bintegral\b", r"\bderivative\b", r"\blogarithm\b", r"\btheorem\b"
+    ]
+    for pattern in out_of_scope:
+        if re.search(pattern, text.lower()):
+            msg = (
+                "I'm your English learning assistant. 😊 "
+                "I can help with vocabulary, grammar, reading, or speaking — "
+                "but not with math or science tasks."
+                if lang != "ru" else
+                "Я помогаю изучать английский 😊 — словарь, грамматика, чтение, разговор, "
+                "но не решаю задачи по математике или физике."
+            )
+            await safe_reply_message(update.message, msg)
+            await log_event(context, "out_of_scope", uid, {"query": text})
+            return
+
+# --- AUTO GRAMMAR HINT  ---
+    grammar_hints = [
+        (r"\b(am|is|are)\s+\w+ing\b", "Present Continuous — be + V-ing for actions happening now."),
+        (r"\b(was|were)\s+\w+ing\b", "Past Continuous — was/were + V-ing for actions in progress in the past."),
+        (r"\b(has|have)\s+\w+(ed|en)\b", "Present Perfect — have/has + V3 for experiences or recent results."),
+        (r"\bhad\s+\w+(ed|en)\b", "Past Perfect — had + V3 for actions before another past."),
+        (r"\bwill\s+\w+\b", "Future Simple — will + base verb for future predictions."),
+        (r"\b(am|is|are|was|were|been|be)\s+\w+(ed|en)\b", "Passive Voice — be + V3 (object focus)."),
+        (r"\b(should|must|can|could|may|might|shall|will|would)\b", "Modal verbs — use base form after modal."),
+        (r"\bif\b.*\bwill\b", "First Conditional — If + Present, will + V."),
+        (r"\bif\b.*\bwould\b", "Second Conditional — If + Past, would + V."),
+        (r"\bif\b.*\bhad\b", "Third Conditional — If + Past Perfect, would have + V3."),
+        (r"\b(er than|more .+ than)\b", "Comparatives — adjective + than."),
+        (r"\b(the .+est|the most)\b", "Superlatives — the + adj-est / the most + adjective."),
+    ]
+    for pattern, hint in grammar_hints:
+        if re.search(pattern, text, re.I):
+            await safe_reply_message(update.message, f"💡 Grammar hint: {hint}")
+            await log_event(context, "grammar_hint", update.effective_user.id, {"hint": hint})
+            break
+
+# ✅ 2. Xác định intent sớm, trước khi xử lý grammar hint
     t = text.lower()
     intent = "chat"
     if re.search(r"\bdefine\b|\bmeaning of\b", t):
@@ -1378,11 +1420,14 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             intent = "talk"
         else:
             intent = "chat"   # vẫn coi là chat bình thường
-    elif re.search(r"\bread\b|\btext\b|\bwrite\b|\btranslate\b|\bgloss\b", t):
+    elif re.search(r"\btranslate\b", t):
+        intent = "translate_gloss"
+    elif re.search(r"\bread\b|\btext\b|\bwrite\b|\bgloss\b", t):
         intent = "reading"
     elif re.search(r"\bquiz\b|\bpractice\b|\bexercise\b", t):
         intent = "practice"
 
+	
 
        # --- TALK CONTEXT CONTINUE ---
     if prefs.get("mode") == "talk" or "talk" in context.user_data:
@@ -1524,16 +1569,57 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await log_event(context, "grammar_explain", uid, {"topic": text})
         return await maybe_nudge(update, context, lang)
 
-    # --- READING ---
+    # --- TRANSLATE GLOSS INTENT ---
+    if intent == "translate_gloss":
+        reset_nudge(context)
+        passage = (context.user_data.get("last_passage") or text).strip()
+        if not passage:
+            return await safe_reply_message(
+                update.message,
+                "⚠️ No text found to gloss. Please send or generate one first."
+                if lang != "ru" else "⚠️ Нет текста. Сначала отправь или сгенерируй текст.",
+                reply_markup=main_menu(lang)
+            )
+
+        await safe_reply_message(update.message, "🔎 Translating gloss version... Please wait.")
+        try:
+            glossed = await build_reading_gloss(passage, lang, translate_mode=True)
+        except Exception as e:
+            logger.warning(f"Translate gloss failed: {e}")
+            return await safe_reply_message(
+                update.message,
+                "❌ Could not create translated gloss. Try again or shorten the text."
+                if lang != "ru" else "❌ Не удалось создать перевод глоссы. Попробуй снова.",
+                reply_markup=main_menu(lang)
+            )
+  
+        # Lưu gloss để tái sử dụng
+        context.user_data["last_gloss"] = glossed
+
+        # Chia nhỏ nếu gloss quá dài
+        chunks = [glossed[i:i+3500] for i in range(0, len(glossed), 3500)]
+        for i, chunk in enumerate(chunks):
+            header = f"📘 Translated gloss (part {i+1}/{len(chunks)}):\n\n" if len(chunks) > 1 else "📘 Translated gloss:\n\n"
+            await safe_reply_message(update.message, trim(header + chunk))
+
+        kb = InlineKeyboardMarkup([
+            [InlineKeyboardButton("📝 Practice this text", callback_data="reading:practice")],
+            [InlineKeyboardButton("🏠 Back to menu", callback_data="menu:root")]
+        ])
+        await safe_reply_message(update.message, "—", reply_markup=kb)
+        await log_event(context, "reading_gloss_translated", uid, {"chars": len(passage)})
+        return
+
+            # --- READING INTENT ---
     if intent == "reading":
         reset_nudge(context)
         level = prefs["cefr"]
         word_count = len(text.split())
 
-        # 1️⃣ Nếu học sinh nói "translate/gloss this text ..." hoặc gửi đoạn dài
-        if re.search(r"\b(gloss|translate)\b", text.lower()) or word_count >= 50:
-            # loại bỏ từ khoá gloss/translate
-            passage = re.sub(r"\b(gloss|translate|this text)\b", "", text, flags=re.I).strip()
+        # 1️⃣ Nếu học sinh nói "gloss this text ..." hoặc gửi đoạn dài
+        if re.search(r"\b(gloss)\b", text.lower()) or word_count >= 50:
+            # loại bỏ từ khoá gloss
+            passage = re.sub(r"\b(gloss|this text)\b", "", text, flags=re.I).strip()
             if not passage:
                 return await safe_reply_message(
                     update.message,
@@ -1544,7 +1630,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             context.user_data["last_passage"] = passage
             context.user_data["reading_topic"] = "user_text"
 
-            await safe_reply_message(update.message, "🔎 Glossing your text, please wait...")
+            await safe_reply_message(update.message, "🔎 Creating gloss version, please wait...")
             try:
                 glossed = await build_reading_gloss(passage, lang)
             except Exception as e:
@@ -1555,13 +1641,13 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     if lang != "ru" else "❌ Не удалось создать глоссу. Попробуй снова."
                 )
 
-            # Nếu gloss dài thì chia nhỏ
+            # Nếu gloss dài thì chia nhỏ để gửi
             chunks = [glossed[i:i+3500] for i in range(0, len(glossed), 3500)]
             for i, chunk in enumerate(chunks):
                 header = f"📘 Glossed text (part {i+1}/{len(chunks)}):\n\n" if len(chunks) > 1 else "📘 Glossed text:\n\n"
                 await safe_reply_message(update.message, trim(header + chunk))
 
-            # Footer chỉ hiển thị các lựa chọn nhẹ
+            # Footer: các lựa chọn nhẹ
             kb = InlineKeyboardMarkup([
                 [InlineKeyboardButton("📖 Another text", callback_data="menu:reading"),
                  InlineKeyboardButton("🏠 Back to menu", callback_data="menu:root")]
@@ -1583,6 +1669,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ]))
         await log_event(context, "reading_passage", uid, {"topic": topic, "mode": "auto_topic"})
         return
+
 
 
     # --- TALK ---
@@ -1633,30 +1720,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await log_event(context, "practice_start", uid, {"topic": text, "count": len(items)})
         return
 
-# --- AUTO GRAMMAR HINT (Patch 11) ---
-    grammar_hints = [
-        (r"\b(am|is|are)\s+\w+ing\b", "Present Continuous — be + V-ing for actions happening now."),
-        (r"\b(was|were)\s+\w+ing\b", "Past Continuous — was/were + V-ing for actions in progress in the past."),
-        (r"\b(has|have)\s+\w+(ed|en)\b", "Present Perfect — have/has + V3 for experiences or recent results."),
-        (r"\bhad\s+\w+(ed|en)\b", "Past Perfect — had + V3 for actions before another past."),
-        (r"\bwill\s+\w+\b", "Future Simple — will + base verb for future predictions."),
-        (r"\b(am|is|are|was|were|been|be)\s+\w+(ed|en)\b", "Passive Voice — be + V3 (object focus)."),
-        (r"\b(should|must|can|could|may|might|shall|will|would)\b", "Modal verbs — use base form after modal."),
-        (r"\bif\b.*\bwill\b", "First Conditional — If + Present, will + V."),
-        (r"\bif\b.*\bwould\b", "Second Conditional — If + Past, would + V."),
-        (r"\bif\b.*\bhad\b", "Third Conditional — If + Past Perfect, would have + V3."),
-        (r"\b(er than|more .+ than)\b", "Comparatives — adjective + than."),
-        (r"\b(the .+est|the most)\b", "Superlatives — the + adj-est / the most + adjective."),
-    ]
-    for pattern, hint in grammar_hints:
-        if re.search(pattern, text, re.I):
-            await safe_reply_message(update.message, f"💡 Grammar hint: {hint}")
-            await log_event(context, "grammar_hint", update.effective_user.id, {"hint": hint})
-            break
 
 # =========================================================
-# PATCH 10: AUTO-GLOSS & SMART GRAMMAR GUIDANCE
-# =========================================================
+    #AUTO-GLOSS & SMART GRAMMAR GUIDANCE
+
     # 1️⃣ Auto Gloss trigger for long English text
     word_count = len(re.findall(r"[A-Za-z]+", text))
     if word_count >= 60 and not re.search(r"\b(translate|gloss)\b", text, re.I):
@@ -1687,9 +1754,36 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await safe_reply_message(update.message, trim(reply), reply_markup=main_menu(lang))
     await log_event(context, "chat_message", uid, {"chars": len(text)})
     await maybe_nudge(update, context, lang)
+
+           
+# --- Nhắc nhở định kỳ trong chế độ chat ---
+    chat_turns = context.user_data.get("chat_turns", 0) + 1
+    context.user_data["chat_turns"] = chat_turns
+
+    if chat_turns == 10:
+        warn_msg = (
+            "⚠️ Reminder: I'm an AI tutor and may make mistakes. "
+            "Please double-check important information."
+            if lang != "ru" else
+            "⚠️ Напоминание: я искусственный интеллект и могу ошибаться. "
+            "Проверяй важные сведения."
+        )
+        kb = InlineKeyboardMarkup([
+            [InlineKeyboardButton("🏠 Menu", callback_data="menu:root")]
+        ])
+        await safe_reply_message(update.message, warn_msg, reply_markup=kb)
+        context.user_data["chat_turns"] = 0  # reset sau khi nhắc
+
+
+   # --- DEFAULT CHAT ---
+    msgs = [
+        {"role": "system", "content": POLICY_CHAT},
+        {"role": "user", "content": text}
+    ]
+
 # =========================================================
-# PATCH 9B: HANDLE IMAGE INPUT
-# =========================================================
+ # HANDLE IMAGE INPUT
+
 async def handle_image(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle photo messages: detect if it's text, grammar exercise, or unrelated."""
     photo = update.message.photo[-1]
@@ -1700,9 +1794,10 @@ async def handle_image(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return await safe_reply_message(update.message, "I couldn't read the image clearly. Try again.")
 
     # Basic classification
-        # =========================================================
-    # PATCH 12: SMART GRAMMAR HINT FROM IMAGE
-    # =========================================================
+
+ # =========================================================
+ # SMART GRAMMAR HINT FROM IMAGE
+
     if re.search(r"(exercise|fill|underline|choose|correct|complete)", text, re.I):
         # Step 1 — phản hồi cơ bản
         await safe_reply_message(update.message,
@@ -1738,30 +1833,32 @@ async def handle_image(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await safe_reply_message(update.message, msg)
         return
 
-    # --- Nhắc nhở định kỳ trong chế độ chat ---
-    chat_turns = context.user_data.get("chat_turns", 0) + 1
-    context.user_data["chat_turns"] = chat_turns
+# =========================================================
+import httpx, io
 
-    if chat_turns == 10:
-        warn_msg = (
-            "⚠️ Reminder: I'm an AI tutor and may make mistakes. "
-            "Please double-check important information."
-            if lang != "ru" else
-            "⚠️ Напоминание: я искусственный интеллект и могу ошибаться. "
-            "Проверяй важные сведения."
-        )
-        kb = InlineKeyboardMarkup([
-            [InlineKeyboardButton("🏠 Menu", callback_data="menu:root")]
-        ])
-        await safe_reply_message(update.message, warn_msg, reply_markup=kb)
-        context.user_data["chat_turns"] = 0  # reset sau khi nhắc
+async def extract_text_from_image(file_obj):
+    """Extract text from image via OCR.Space API (compatible with Render)."""
+    try:
+        bio = io.BytesIO()
+        await file_obj.download_to_memory(out=bio)
+        bio.seek(0)
 
+        files = {'file': ('image.jpg', bio, 'image/jpeg')}
+        data = {"language": "eng", "isOverlayRequired": False}
 
-   # --- DEFAULT CHAT ---
-    msgs = [
-        {"role": "system", "content": POLICY_CHAT},
-        {"role": "user", "content": text}
-    ]
+        async with httpx.AsyncClient(timeout=60.0) as client:
+            r = await client.post("https://api.ocr.space/parse/image", data=data, files=files)
+            r.raise_for_status()
+            result = r.json()
+
+        text = result.get("ParsedResults", [{}])[0].get("ParsedText", "").strip()
+        if not text:
+            logger.warning("OCR returned empty text")
+        return text
+    except Exception as e:
+        logger.warning(f"OCR API error: {e}")
+        return ""
+
 
 # =========================================================
 # 17) FLASK HEALTHCHECK & MAIN ENTRYPOINT
