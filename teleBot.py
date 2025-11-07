@@ -17,6 +17,16 @@ from telegram.ext import (
     ContextTypes, filters
 )
 
+# --- SIMPLE VOCAB BANK HANDLER ---
+def add_vocab_to_bank(context, word: str):
+    """Lưu từ vựng vào bộ nhớ tạm (per-user)."""
+    if not word:
+        return
+    bank = context.user_data.get("vocab_bank", [])
+    if word not in bank:
+        bank.append(word)
+        context.user_data["vocab_bank"] = bank
+    logger.info(f"VOCAB BANK UPDATED: {context.user_data['vocab_bank']}")
 # =========================================================
 # 1) LOGGING
 # =========================================================
@@ -414,14 +424,21 @@ async def build_reading_gloss(text: str, ui_lang: str):
 # --- Talk Coach Builder ---
 async def talk_reply(user_text: str, topic: str, ui_lang: str):
     """Friendly English coach — corrects lightly and gives short tips."""
+    lang_note = (
+        "If the student uses Russian or another language, respond mostly in English but briefly explain one key word in that language."
+        if ui_lang == "ru" else
+        "Keep the whole reply in English."
+    )
+
     prompt = (
         f"You are an encouraging English speaking coach for students (A2–B1+). "
         f"Topic: {topic}. The student said: '{user_text}'. "
         "1️⃣ Respond naturally in 1–3 sentences of conversational English.\n"
-        "2️⃣ If the student makes a grammar or vocabulary mistake, correct it implicitly (reformulate naturally).\n"
+        "2️⃣ Correct grammar or vocabulary mistakes implicitly (reformulate naturally).\n"
         "3️⃣ Add 1–2 short useful phrases, words, or sentence patterns that fit the topic, marked with '[Tip:]'.\n"
         "4️⃣ End your reply with one friendly question to keep the talk going.\n"
-        "Output plain text only. No markdown, no bold, no list format."
+        f"5️⃣ {lang_note}\n"
+        "Output plain text only. No markdown, no bold, no lists."
     )
 
     msgs = [
@@ -1150,35 +1167,61 @@ async def on_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
 
-
-    # === TALK TOPIC SELECT ===
-    if data.startswith("talk:topic:"):
-        topic = data.split(":")[-1]
+        # === TALK MODE ENTRY ===
+    if data == "menu:talk":
         prefs["mode"] = "talk"
-        context.user_data["talk"] = {"topic": topic, "turns": 0}
+        context.user_data["talk"] = {"topic": "general", "turns": 0}
 
-        greet = (f"Let's talk about {topic}! You start 😊"
-                 if lang != "ru" else f"Поговорим о {topic}! Начинай 😊")
+        # 💬 Lời chào khi vào Talk Mode
+        msg = (
+            "🗣 Let's practice speaking English!\n"
+            "You can start by talking about your school, family, hobbies or future plans.\n"
+            "I'll listen and help you with light corrections and useful phrases."
+            if lang != "ru" else
+            "🗣 Потренируемся говорить по-английски!\n"
+            "Ты можешь начать рассказывать о школе, семье, хобби или планах на будущее.\n"
+            "Я помогу с исправлениями и полезными фразами."
+        )
 
-        # 💡 Gợi ý mẫu câu mở đầu theo chủ đề
-        talk_tips = {
-            "school": "You can start with: 'I study at...', 'My favorite subject is...', or 'I like my English teacher because...'",
-            "family": "Try: 'I live with...', 'My parents are...', 'We often ... together.'",
-            "hobbies": "Try: 'I like ...ing', 'My hobby is ...', 'I spend time ...', 'I enjoy ... because ...'",
-            "travel": "Try: 'I want to go to...', 'Last summer I...', 'I like visiting ...'",
-            "friends": "You can start with: 'My best friend is...', 'We often ... together.', 'I like my friends because ...'",
-            "future": "Try: 'In the future, I want to...', 'I will be ...', 'I hope to ...'"
-        }
+        # 💡 Gợi ý ngẫu nhiên mẫu câu mở đầu
+        talk_tips = [
+            "You can start with: 'My name is ...', 'I'm from ...', or 'I like ... because ...'",
+            "Try: 'At school, I usually ...', 'My favorite subject is ...'",
+            "Try: 'In my free time, I ...', 'My hobby is ...'",
+            "Try: 'My family is ...', 'We often ... together.'",
+            "You can say: 'In the future, I want to ...', 'I hope to visit ... someday.'"
+        ]
+        import random
+        tip = random.choice(talk_tips)
 
-        await safe_edit_text(q, greet, reply_markup=InlineKeyboardMarkup([
+        kb = InlineKeyboardMarkup([
+            [InlineKeyboardButton("💬 More ideas", callback_data="talk:more"),
+             InlineKeyboardButton("🏠 Back to menu", callback_data="menu:root")]
+        ])
+
+        await safe_edit_text(q, msg, reply_markup=kb)
+        await safe_reply_message(update.callback_query.message, f"💡 Tip: {tip}")
+
+        await log_event(context, "talk_mode_started", uid, {})
+        return
+
+    # === TALK: MORE IDEAS ===
+    if data == "talk:more":
+        topic = (context.user_data.get("talk") or {}).get("topic", "daily life")
+        prompt = (
+            f"Give 3 short example sentences or ideas about {topic}. "
+            "Each 5–10 words, level A2–B1+, plain English. No markdown."
+        )
+        msgs = [
+            {"role": "system", "content": POLICY_STUDY},
+            {"role": "user", "content": prompt}
+        ]
+        out = await ask_openai(msgs, max_tokens=150)
+        kb = InlineKeyboardMarkup([
             [InlineKeyboardButton("🏠 Menu", callback_data="menu:root")]
-        ]))
-
-        # Hiển thị gợi ý mẫu câu mở đầu
-        if topic in talk_tips:
-            await safe_reply_message(update.callback_query.message, talk_tips[topic])
-
-        await log_event(context, "talk_topic_set", uid, {"topic": topic})
+        ])
+        await safe_edit_text(q, trim(out), reply_markup=kb)
+        await log_event(context, "talk_more_ideas", uid, {"topic": topic})
         return
 
 
@@ -1214,27 +1257,76 @@ async def extract_text_from_image(file_obj):
 # 15) TALK COACH & NUDGE SYSTEM
 # =========================================================
 async def talk_coach(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """English speaking coach — responds supportively and keeps dialogue going."""
     prefs = get_prefs(update.effective_user.id)
     lang = prefs.get("lang", "en")
-    state = context.user_data.get("talk", {"topic": "school life", "turns": 0})
-    topic = state.get("topic", "school life")
+
+    # Chỉ hoạt động khi đang ở Talk Mode
+    if prefs.get("mode") != "talk":
+        return
+
+    state = context.user_data.get("talk", {"topic": "general", "turns": 0})
+    topic = state.get("topic", "general")
     user_text = update.message.text or ""
-    reply = await talk_reply(user_text, topic, lang)
+
+    # Gọi AI tạo phản hồi
+    try:
+        reply = await talk_reply(user_text, topic, lang)
+    except Exception as e:
+        logger.warning(f"talk_reply failed: {e}")
+        reply = "Sorry, I didn’t catch that. Could you say it again?"
+
+    # Cập nhật lượt trò chuyện
     state["turns"] = state.get("turns", 0) + 1
     context.user_data["talk"] = state
-    await safe_reply_message(update.message, trim(reply), reply_markup=InlineKeyboardMarkup([
+
+    # Hiển thị phản hồi + footer
+    kb = InlineKeyboardMarkup([
         [InlineKeyboardButton("💬 More ideas", callback_data="talk:more"),
          InlineKeyboardButton("🏠 Menu", callback_data="menu:root")]
-    ]))
+    ])
+    await safe_reply_message(update.message, trim(reply), reply_markup=kb)
+
+    # --- Khen nhẹ mỗi 5 lượt ---
+    if state["turns"] % 5 == 0:
+        encouragement = random.choice([
+            "You're doing great! Keep going!",
+            "Nice! Could you give me an example?",
+            "That’s interesting — tell me more!",
+            "Great effort! I like your sentences!"
+        ])
+        await safe_reply_message(update.message, encouragement)
+
+    # --- Nhắc nhở nhỏ mỗi 10 lượt ---
+    if state["turns"] == 10:
+        msg_warn = (
+            "⚠️ Reminder: I'm an AI tutor and may make mistakes. "
+            "Please double-check important information."
+            if lang != "ru" else
+            "⚠️ Напоминание: я искусственный интеллект и могу ошибаться. "
+            "Проверяй важные сведения."
+        )
+        await safe_reply_message(update.message, msg_warn)
+
+    # --- Nếu đủ 20 lượt, gợi ý kết thúc ---
     if state["turns"] >= 20:
-        await safe_reply_message(update.message,
-            "Great chat! Try Vocabulary or Grammar practice next." if lang!="ru"
-            else "Отличная беседа! Попробуй упражнения по словарю или грамматике.",
-            reply_markup=main_menu(lang))
+        end_msg = (
+            "That was a great talk! Would you like to practice vocabulary or grammar next?"
+            if lang != "ru" else
+            "Отличная беседа! Хочешь потренироваться со словами или грамматикой?"
+        )
+        kb_end = InlineKeyboardMarkup([
+            [InlineKeyboardButton("📚 Practice", callback_data="menu:practice"),
+             InlineKeyboardButton("🏠 Menu", callback_data="menu:root")]
+        ])
+        await safe_reply_message(update.message, trim(reply))
+        await safe_reply_message(update.message, end_msg, reply_markup=kb_end)
+        prefs["mode"] = "chat"
         context.user_data.pop("talk", None)
+        return
+
     await log_event(context, "talk_message", update.effective_user.id,
                     {"topic": topic, "turns": state["turns"]})
-
 
 # --- Nudge mini-quiz ---
 def increment_nudge(context):
@@ -1281,7 +1373,11 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif re.search(r"\bgrammar\b|\btense\b|\bexplain\b|\brule\b", t):
         intent = "grammar"
     elif re.search(r"\btalk\b|\bconversation\b|\bspeak\b", t):
-        intent = "talk"
+        # Chỉ kích hoạt Talk Mode nếu học sinh đã vào mode talk qua menu
+        if prefs.get("mode") == "talk":
+            intent = "talk"
+        else:
+            intent = "chat"   # vẫn coi là chat bình thường
     elif re.search(r"\bread\b|\btext\b|\bwrite\b|\btranslate\b|\bgloss\b", t):
         intent = "reading"
     elif re.search(r"\bquiz\b|\bpractice\b|\bexercise\b", t):
