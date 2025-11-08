@@ -1406,10 +1406,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             intent = "talk"
         else:
             intent = "chat"   # vẫn coi là chat bình thường
-    elif re.search(r"\btranslate\b", t):
-        intent = "translate_gloss"
-    elif re.search(r"\bread\b|\btext\b|\bwrite\b|\bgloss\b", t):
+    elif re.search(r"\bread\b|\btext\b|\bwrite\b|\btranslate\b|\bgloss\b", t):
         intent = "reading"
+
     elif re.search(r"\bquiz\b|\bpractice\b|\bexercise\b", t):
         intent = "practice"
 
