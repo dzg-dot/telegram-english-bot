@@ -1847,7 +1847,7 @@ def start_flask():
 
 def main():
     application = Application.builder().token(TELEGRAM_TOKEN).build()
-    application.add_handler(CommandHandler("start", handle_start))
+    application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("menu", handle_menu))
     application.add_handler(CommandHandler("help", help_cmd))
     application.add_handler(CallbackQueryHandler(on_cb))
