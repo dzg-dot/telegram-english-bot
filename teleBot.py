@@ -494,105 +494,116 @@ def fuzzy_equal(a: str, b: str, threshold: float = 0.85) -> bool:
 
 async def build_mcq(topic_or_text: str, ui_lang: str, level: str, flavor: str = "generic"):
     """
-    Create 5-question MCQ set based on grade and practice type.
-    Each flavor has its own prompt. Level (A2–B1) controls difficulty.
+    Create a 5-question MCQ set based on grade, topic, and exercise flavor.
+    Supports: vocab_*, grammar_*, reading_*.
     """
-    # Map practice flavor -> task description
+    # =========================
+    # 1️⃣ Define task map
+    # =========================
     task_map = {
-        # --- VOCABULARY ---
-        "vocab_syn": (
-            "Write 5 multiple-choice questions that test the student's knowledge of synonyms "
-            "for the given English word or phrase.\n"
-            "Each question should:\n"
-            "• Include one clear instruction like: 'Choose the synonym for ...' or 'Which word is closest in meaning to ...?'\n"
-            "• Contain one short sentence using the word in context.\n"
-            "• Provide 4 concise options (A–D) with one correct synonym and three distractors.\n"
-            "• Mark the correct answer and explain briefly why it’s correct."
+        # --- VOCABULARY TYPES ---
+        "vocab_synonyms": (
+            "Write 5 multiple-choice questions testing SYNONYMS for the given word or phrase. "
+            "Each question should have:\n"
+            "• A short instruction like 'Choose the synonym for ...'.\n"
+            "• 4 options (A–D), one correct synonym.\n"
+            "• A brief explanation (≤20 words) why it’s correct."
         ),
-        "vocab_ant": (
-            "Write 5 multiple-choice questions that test antonyms for the given English word or phrase.\n"
-            "Each question should:\n"
-            "• Include an instruction like: 'Choose the antonym for ...' or 'Which word has the opposite meaning?'\n"
-            "• Contain one example sentence if helpful.\n"
-            "• Provide 4 short options (A–D), one correct antonym, and three distractors.\n"
-            "• Mark the correct answer and add a short explanation."
+        "vocab_antonyms": (
+            "Write 5 MCQs testing ANTONYMS of the given word or phrase. "
+            "Include short sentences where helpful. Each question: 4 options (A–D), one correct opposite meaning."
         ),
-        "vocab_cloze": (
-            "Write 5 fill-in-the-blank questions using the given word or its correct form.\n"
-            "Each question should:\n"
-            "• Include a blank '____' in the sentence.\n"
-            "• Provide 4 options (A–D) where one fits grammatically and semantically.\n"
-            "• Mark the correct answer and add a one-sentence explanation."
+        "vocab_context": (
+            "Write 5 MCQs asking students to choose the best word IN CONTEXT. "
+            "Each question shows one short sentence with a blank '____'. "
+            "Provide 4 options, 1 correct, 3 distractors. Add short explanations."
+        ),
+        "vocab_formation": (
+            "Write 5 MCQs testing WORD FORMATION (noun, verb, adjective, adverb forms). "
+            "Each question should include a sentence with a blank, e.g. 'She was very ____ (beauty)'."
+        ),
+        "vocab_collocations": (
+            "Write 5 MCQs testing common COLLOCATIONS with the given word. "
+            "Each question gives a phrase with a missing word (e.g., 'make ___', 'heavy ___'). "
+            "4 options (1 correct), short explanations."
+        ),
+        "vocab_phrasal": (
+            "Write 5 MCQs testing PHRASAL VERBS with the given base verb. "
+            "Each question uses a natural short sentence and 4 options (e.g. 'give up', 'take off'). "
+            "Include correct answer and a 1-sentence explanation."
         ),
 
-        # --- GRAMMAR ---
-        "grammar_rule": (
-            "Write 5 mixed grammar MCQs testing the rule below. "
-            "Mix 3 styles:\n"
-            "• 2 verb-form questions\n"
-            "• 1 error-correction question\n"
-            "• 1 word-order question\n"
-            "• 1 contextual question (short text). "
-            "Each question must have 4 clear options (A–D). "
-            "Provide the correct answer and a short explanation (≤20 words). "
-            "Level: {level}."
+        # --- GRAMMAR TYPES ---
+        "grammar_verbs": (
+            "Write 5 MCQs where students choose the correct VERB FORM (tense, agreement, or aspect). "
+            "Each question has 4 options and a short explanation. Level: {level}."
         ),
-        "grammar_verb": (
-            "Write 5 MCQs where students choose the correct verb form based on the rule below. "
-            "Each question should be one sentence long with 4 options. "
-            "Level: {level}."
-        ),
-        "grammar_error": (
-            "Write 5 MCQs where students identify and correct grammatical errors. "
-            "Show one incorrect sentence per question, 4 possible corrected forms (1 correct). "
-            "Explain the correction briefly. Level: {level}."
+        "grammar_errors": (
+            "Write 5 MCQs for ERROR CORRECTION. Each shows one incorrect sentence. "
+            "Provide 4 corrected versions (A–D). Explain briefly why the correct form is right."
         ),
         "grammar_order": (
-            "Write 5 MCQs where students select the correct word order in English sentences. "
-            "Each question should have 4 answer choices (1 correct). Level: {level}."
+            "Write 5 MCQs testing WORD ORDER. "
+            "Each question gives 4 jumbled options (A–D), one grammatically correct."
+        ),
+        "grammar_conditionals": (
+            "Write 5 MCQs about CONDITIONALS (0, 1st, 2nd, 3rd). "
+            "Include mixed examples with 4 options. Add 1-sentence explanation."
+        ),
+        "grammar_modals": (
+            "Write 5 MCQs about MODAL VERBS (can, must, should, might, etc.). "
+            "Ask for correct usage or meaning. Provide 4 options, short explanation."
+        ),
+        "grammar_mixed": (
+            "Write 5 mixed GRAMMAR MCQs combining tenses, modals, and prepositions. "
+            "Level: {level}. Each question has 4 clear options."
         ),
 
-        # --- READING ---
-        "reading_main": (
-            "Write 5 MCQs testing the main idea of the passage. "
-            "Avoid trivial details; focus on the topic and purpose. "
-            "Provide 4 concise options (A–D). Include correct answer and short explanation."
+        # --- READING TYPES ---
+        "reading_mainidea": (
+            "Write 5 READING COMPREHENSION questions about the MAIN IDEA of the passage. "
+            "Avoid details; focus on topic and purpose."
         ),
-        "reading_detail": (
-            "Write 5 MCQs about specific details or facts from the passage. "
-            "Avoid overly easy or factual questions. Include 4 options (A–D)."
+        "reading_details": (
+            "Write 5 MCQs about SPECIFIC DETAILS or facts from the passage. "
+            "Each question should have 4 options and 1-sentence explanation."
         ),
-        "reading_vocab": (
-            "Write 5 MCQs asking for the meaning of words or phrases in context. "
-            "Each question should quote a short sentence from the passage. "
-            "Provide 4 choices: 1 correct, 3 plausible. Level: {level}."
+        "reading_inference": (
+            "Write 5 MCQs testing INFERENCE — what can be understood but not directly stated. "
+            "Each question has 4 choices and a short explanation."
+        ),
+        "reading_vocabcontext": (
+            "Write 5 MCQs about VOCABULARY IN CONTEXT. "
+            "Each question quotes a short sentence and asks the meaning of one word or phrase."
         ),
         "reading_cloze": (
-            "Write 5 fill-in-the-blank MCQs based on the passage. "
-            "Each question should omit one key word. "
-            "Provide 4 choices (1 correct)."
+            "Write 5 CLOZE TEST questions (fill in missing word in passage). "
+            "Each blank should have 4 possible options (A–D)."
         ),
 
-        # --- GENERIC / FALLBACK ---
+        # --- FALLBACK / GENERIC ---
         "generic": (
-            "Write 5 general English MCQs (A2–B1+) combining grammar, vocabulary, and everyday English. "
-            "Provide 4 options per question. Include the correct answer and short explanations."
-        )
+            "Write 5 general English MCQs (A2–B1+). "
+            "Mix grammar, vocabulary, and reading comprehension. 4 options per question."
+        ),
     }
 
-
-    # Select prompt text by flavor
+    # =========================
+    # 2️⃣ Select task prompt
+    # =========================
     task = task_map.get(flavor, task_map["generic"])
 
-    # CEFR explanation tag for the model
+    # Difficulty tag
     if level in ("A2", "A2+"):
-        diff_note = "Use simple sentences and common words. Avoid abstract grammar."
+        diff_note = "Use simple sentences and everyday words."
     elif level == "B1":
-        diff_note = "Include 1–2 slightly challenging structures or idioms."
+        diff_note = "Include 1–2 slightly more advanced structures or idioms."
     else:
-        diff_note = "Use neutral A2–B1 school-level language."
+        diff_note = "Keep within A2–B1 school-level range."
 
-    # Core prompt to model
+    # =========================
+    # 3️⃣ Construct model prompt
+    # =========================
     prompt = (
         f"{task}\n\n"
         "Return STRICT JSON only in this format:\n"
@@ -608,17 +619,20 @@ async def build_mcq(topic_or_text: str, ui_lang: str, level: str, flavor: str = 
     msgs = [{"role": "system", "content": POLICY_STUDY},
             {"role": "user", "content": prompt}]
 
-    # Request model
+    # =========================
+    # 4️⃣ Request from model
+    # =========================
     raw = await ask_openai(msgs, max_tokens=950)
     try:
-        # Extract JSON portion
         data = json.loads(re.search(r"\{.*\}", raw, re.S).group())
         questions = data.get("questions", [])
     except Exception as e:
         logger.warning(f"MCQ parse fail: {e} | raw={raw}")
         questions = []
 
-    # Validate questions (ensure 4 options)
+    # =========================
+    # 5️⃣ Validate questions
+    # =========================
     valid = []
     for q in questions:
         opts = q.get("options", [])
@@ -745,11 +759,15 @@ async def practice_summary(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         again_callback = "footer:again"
 
-    # --- Keyboard ---
+        # --- Build footer keyboard (simplified & smart back) ---
+    again_callback = "footer:again"
+    back_target = "menu:practice" if scope in ("vocab", "grammar", "reading") else "menu:root"
+
     kb = InlineKeyboardMarkup([
-        [InlineKeyboardButton("🔁 Continue practice", callback_data=again_callback)],
-        [InlineKeyboardButton("🏠 Back to menu", callback_data="menu:root")]
+        [InlineKeyboardButton("🔁 Again", callback_data=again_callback)],
+        [InlineKeyboardButton("⬅️ Back to menu", callback_data=back_target)]
     ])
+
 
     # --- Reset nudge if mini-quiz ---
     if st.get("type") == "nudge_quiz":
@@ -842,48 +860,99 @@ async def on_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # === MAIN PRACTICE MENU ===
     if data == "menu:practice":
-        txt = "Choose a practice type:" if lang != "ru" else "Выберите тип практики:"
+        txt = "Choose a practice category:" if lang != "ru" else "Выберите категорию практики:"
         kb = InlineKeyboardMarkup([
-            [InlineKeyboardButton("🧩 Multiple Choice", callback_data="practice:type:mcq"),
-             InlineKeyboardButton("✏️ Fill in the Blanks", callback_data="practice:type:fill")],
-            [InlineKeyboardButton("🔤 Verb Forms", callback_data="practice:type:verb"),
-             InlineKeyboardButton("🛠 Error Correction", callback_data="practice:type:error")],
-            [InlineKeyboardButton("⬅️ Back", callback_data="menu:root")]
+            [InlineKeyboardButton("🧠 Vocabulary", callback_data="practice:vocab_menu")],
+            [InlineKeyboardButton("⚙️ Grammar", callback_data="practice:grammar_menu")],
+            [InlineKeyboardButton("📖 Reading", callback_data="practice:reading_menu")],
+            [InlineKeyboardButton("🏠 Back to menu", callback_data="menu:root")]
+        ])
+        await safe_edit_text(q, txt, reply_markup=kb)
+        return
+
+    if data == "practice:vocab_menu":
+        txt = "Choose a vocabulary exercise type:" if lang != "ru" else "Выберите тип словарной практики:"
+        kb = InlineKeyboardMarkup([
+            [InlineKeyboardButton("🔤 Synonyms", callback_data="practice:vocab:synonyms"),
+             InlineKeyboardButton("❌ Antonyms", callback_data="practice:vocab:antonyms")],
+            [InlineKeyboardButton("📘 Word in Context", callback_data="practice:vocab:context"),
+             InlineKeyboardButton("🧩 Word Formation", callback_data="practice:vocab:formation")],
+            [InlineKeyboardButton("🪄 Collocations", callback_data="practice:vocab:collocations"),
+             InlineKeyboardButton("🌀 Phrasal Verbs", callback_data="practice:vocab:phrasal")],
+            [InlineKeyboardButton("🔙 Back", callback_data="menu:practice")]
+        ])
+        await safe_edit_text(q, txt, reply_markup=kb)
+        return
+
+    if data == "practice:grammar_menu":
+        txt = "Choose a grammar exercise type:" if lang != "ru" else "Выберите тип грамматической практики:"
+        kb = InlineKeyboardMarkup([
+            [InlineKeyboardButton("🧾 Verb Forms", callback_data="practice:grammar:verbs"),
+             InlineKeyboardButton("🧹 Error Correction", callback_data="practice:grammar:errors")],
+            [InlineKeyboardButton("🔀 Word Order", callback_data="practice:grammar:order"),
+             InlineKeyboardButton("⛓ Conditionals", callback_data="practice:grammar:conditionals")],
+            [InlineKeyboardButton("🗣 Modal Verbs", callback_data="practice:grammar:modals"),
+             InlineKeyboardButton("📚 Mixed Grammar", callback_data="practice:grammar:mixed")],
+            [InlineKeyboardButton("🔙 Back", callback_data="menu:practice")]
+        ])
+        await safe_edit_text(q, txt, reply_markup=kb)
+        return
+
+    if data == "practice:reading_menu":
+        txt = "Choose a reading exercise type:" if lang != "ru" else "Выберите тип чтения:"
+        kb = InlineKeyboardMarkup([
+            [InlineKeyboardButton("🌟 Main Idea", callback_data="practice:reading:mainidea"),
+             InlineKeyboardButton("🔍 Details", callback_data="practice:reading:details")],
+            [InlineKeyboardButton("💭 Inference", callback_data="practice:reading:inference"),
+             InlineKeyboardButton("🧠 Vocabulary in Context", callback_data="practice:reading:vocabcontext")],
+            [InlineKeyboardButton("✏️ Cloze Passage", callback_data="practice:reading:cloze")],
+            [InlineKeyboardButton("🔙 Back", callback_data="menu:practice")]
         ])
         await safe_edit_text(q, txt, reply_markup=kb)
         return
 
 
     # === PRACTICE TYPE HANDLER ===
-    if data.startswith("practice:type:"):
-        typ = data.split(":")[2]
-        flavor_map = {
-            "mcq": "grammar_mcq",
-            "fill": "grammar_fill",
-            "verb": "verb_forms",
-            "error": "error_fix"
-        }
-        flavor = flavor_map.get(typ, "grammar_mcq")
-        topic = context.user_data.get("last_grammar_topic", "English Grammar")
-        items = await build_mcq(topic, lang, prefs["cefr"], flavor=flavor)
-        items = items[:5]
+    if data.startswith("practice:vocab:") or data.startswith("practice:grammar:") or data.startswith("practice:reading:"):
+        try:
+            _, group, flavor = data.split(":")
+        except ValueError:
+            return await safe_edit_text(q, "⚠️ Invalid exercise type.", reply_markup=main_menu(lang))
+
+        prefs = get_prefs(uid)
+        lang = prefs.get("lang", "en")
+        level = prefs.get("cefr", "A2")
+
+        await safe_edit_text(q, f"📝 Generating {group.capitalize()} - {flavor.capitalize()} practice... Please wait.")
+
+        # topic_or_text: lấy từ bài đọc gần nhất hoặc “general English”
+        topic_or_text = context.user_data.get("last_passage", "general English")
+
+        # Map group+flavor về build_mcq flavor key
+        flavor_key = f"{group}_{flavor}"
+
+        try:
+            items = await build_mcq(topic_or_text, lang, level, flavor=flavor_key)
+        except Exception as e:
+            logger.warning(f"build_mcq error ({flavor_key}): {e}")
+            return await safe_edit_text(q, "❌ Failed to create practice questions. Try again later.", reply_markup=main_menu(lang))
 
         if not items:
-            return await safe_edit_text(q, "⚠️ No questions found.", reply_markup=main_menu(lang))
+            return await safe_edit_text(q, "⚠️ No questions generated.", reply_markup=main_menu(lang))
 
+        # Store state
         context.user_data["practice"] = {
-            "type": typ,
-            "topic": topic,
+            "type": "practice",
+            "scope": group,
+            "flavor": flavor_key,
             "items": items,
             "idx": 0,
             "score": 0,
-            "ui_lang": lang,
-            "scope": "practice",
-            "retry": False
+            "ui_lang": lang
         }
 
-        await send_practice_item(q, context)
-        await log_event(context, "practice_start", uid, {"type": typ, "count": len(items)})
+        await send_practice_item(update.callback_query, context)
+        await log_event(context, "practice_start", uid, {"group": group, "flavor": flavor})
         return
 
 
