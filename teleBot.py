@@ -639,7 +639,7 @@ async def build_mcq(topic_or_text: str, ui_lang: str, level: str, flavor: str = 
     return valid
 
 
-
+# =========================================================
 async def send_practice_item(update_or_query, context: ContextTypes.DEFAULT_TYPE):
     """Send a multiple-choice question with safe text wrapping and full option display."""
     st = context.user_data.get("practice")
@@ -695,8 +695,9 @@ async def send_practice_item(update_or_query, context: ContextTypes.DEFAULT_TYPE
         await safe_edit_text(update_or_query, txt, reply_markup=kb)
 
 
+# =========================================================
 async def practice_summary(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Show practice results with explanations and next-step buttons for all modes."""
+    """Show practice results with explanations, reward line, and next-step buttons."""
     st = context.user_data.get("practice")
     if not st:
         return
@@ -707,7 +708,7 @@ async def practice_summary(update: Update, context: ContextTypes.DEFAULT_TYPE):
     ptype = st.get("type", "generic")
     scope = st.get("scope", "free")
 
-    # --- Text header ---
+    # --- Header ---
     lines = []
     if lang == "ru":
         lines.append(f"Итоги: {score}/{total}")
@@ -716,14 +717,25 @@ async def practice_summary(update: Update, context: ContextTypes.DEFAULT_TYPE):
         lines.append(f"Summary: {score}/{total}")
         lines.append("Answers and explanations:")
 
-    # --- Each item explanation ---
+    # --- Item explanations ---
     for it in st["items"]:
         expl = it.get("explain_ru") if lang == "ru" else it.get("explain_en")
         if not expl:
             expl = "(no explanation)"
         lines.append(f"Q{it.get('id', '?')}: {it.get('answer', '')} — {expl}")
 
-    # --- Determine correct “continue” action ---
+    # --- Inline reward text ---
+    rate = score / max(total, 1)
+    if rate >= 1.0:
+        reward_text = "🌟 Perfect! All correct!" if lang != "ru" else "🌟 Отлично! Все правильно!"
+    elif rate >= 0.6:
+        reward_text = "⭐ Great work!" if lang != "ru" else "⭐ Отличная работа!"
+    else:
+        reward_text = "👏 Nice try!" if lang != "ru" else "👏 Хорошая попытка!"
+    lines.append("")  # add space
+    lines.append(reward_text)
+
+    # --- Determine “continue” action ---
     if scope == "vocab":
         again_callback = "vocab:practice"
     elif scope == "grammar":
@@ -733,21 +745,20 @@ async def practice_summary(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         again_callback = "footer:again"
 
-    # --- Build footer keyboard ---
+    # --- Keyboard ---
     kb = InlineKeyboardMarkup([
         [InlineKeyboardButton("🔁 Continue practice", callback_data=again_callback)],
         [InlineKeyboardButton("🏠 Back to menu", callback_data="menu:root")]
     ])
 
-    if st["type"] == "nudge_quiz":
+    # --- Reset nudge if mini-quiz ---
+    if st.get("type") == "nudge_quiz":
         reset_nudge(context)
 
-    # --- Send summary ---
+    # --- Send summary + reward together ---
     await safe_reply_message(update.message, trim("\n".join(lines)), reply_markup=kb)
 
-    await reward_message(update, context, score, total, lang)
-
-    # --- Log event ---
+    # --- Log result ---
     await log_event(context, "practice_done", update.effective_user.id, {
         "type": ptype,
         "topic": st.get("topic"),
@@ -758,23 +769,7 @@ async def practice_summary(update: Update, context: ContextTypes.DEFAULT_TYPE):
    
 
 # =========================================================
-# 12) REWARD HELPERS
-# =========================================================
-async def reward_message(update, context, score, total, lang="en"):
-    rate = score / max(total, 1)
-    if rate >= 1.0:
-        msg = "🌟 Perfect! All correct!" if lang != "ru" else "🌟 Отлично! Все правильно!"
-    elif rate >= 0.6:
-        msg = "⭐ Great work!" if lang != "ru" else "⭐ Отличная работа!"
-    else:
-        msg = "👏 Nice try!" if lang != "ru" else "👏 Хорошая попытка!"
-    kb = InlineKeyboardMarkup([[InlineKeyboardButton("🏠 Menu", callback_data="menu:root")]])
-    await safe_reply_message(update.message, msg, reply_markup=kb)
-    await log_event(context, "reward_given", update.effective_user.id, {"score": score})
-
-
-# =========================================================
-# 13) CALLBACK HANDLER
+# 12) CALLBACK HANDLER
 
 async def on_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
@@ -1263,7 +1258,7 @@ async def on_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 # =========================================================
-# 15) TALK COACH & NUDGE SYSTEM
+# 13) TALK COACH & NUDGE SYSTEM
 # =========================================================
 async def talk_coach(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """English speaking coach — responds supportively and keeps dialogue going."""
@@ -1378,7 +1373,7 @@ async def maybe_nudge(update, context, lang):
 
 
 # =========================================================
-# 16) HANDLE MESSAGE (CHAT-FIRST LOGIC)
+# 14) HANDLE MESSAGE (CHAT-FIRST LOGIC)
 # =========================================================
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = (update.message.text or "").strip()
@@ -1951,7 +1946,7 @@ async def extract_text_from_image(file_obj):
         return ""
 
 # =========================================================
-# 17) FLASK HEALTHCHECK & MAIN ENTRYPOINT
+# 15) FLASK HEALTHCHECK & MAIN ENTRYPOINT
 # =========================================================
 app = Flask(__name__)
 
