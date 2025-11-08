@@ -279,7 +279,7 @@ HELP_TEXT_RU = (
 
 
 # =========================================================
-# 8) START / HELP COMMANDS
+# 8) START / HELP / MENU COMMANDS
 # =========================================================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     greet = "Choose your language / Выберите язык:"
@@ -289,6 +289,15 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     ])
     await safe_reply_message(update.message, greet, reply_markup=kb)
     await log_event(context, "start", update.effective_user.id, {})
+
+
+# --- MENU COMMAND HANDLER ---
+async def handle_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Hiển thị lại menu chính khi người dùng gõ /menu"""
+    prefs = get_prefs(update.effective_user.id)
+    lang = prefs.get("lang", "en")
+    await safe_reply_message(update.message, "📋 Main menu:", reply_markup=main_menu(lang))
+    await log_event(context, "menu_command", update.effective_user.id, {})
 
 async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     prefs = get_prefs(update.effective_user.id)
@@ -302,6 +311,7 @@ async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await safe_reply_message(update.message, txt, reply_markup=kb)
     await log_event(context, "help_open", update.effective_user.id, {"lang": lang})
+
 
 # =========================================================
 # 9) ASK OPENAI WRAPPER
@@ -746,10 +756,7 @@ async def reward_message(update, context, score, total, lang="en"):
 
 # =========================================================
 # 13) CALLBACK HANDLER
-# =========================================================
-# =========================================================
-# 13) CALLBACK HANDLER (FINAL VERSION)
-# =========================================================
+
 async def on_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
     data = q.data or ""
@@ -923,7 +930,6 @@ async def on_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
 
-        # === GRAMMAR PRACTICE (3 câu theo last_grammar_topic) ===
         # === GRAMMAR PRACTICE (with retry & summary footer) ===
     if data == "grammar:practice":
         topic = context.user_data.get("last_grammar_topic", "Present Simple")
@@ -1689,21 +1695,26 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await log_event(context, "practice_start", uid, {"topic": text, "count": len(items)})
         return
 
+
+
     # --- DEFAULT CHAT MODE ---
+
     if intent == "chat":
         msgs = [
             {"role": "system", "content": POLICY_CHAT},
             {"role": "user", "content": text}
         ]
-        try:
-            reply = await ask_openai(msgs, max_tokens=350)
-            await safe_reply_message(update.message, trim(reply), reply_markup=main_menu(lang))
-            await log_event(context, "chat_message", uid, {"chars": len(text)})
-            await maybe_nudge(update, context, lang)
-        except Exception as e:
-            logger.warning(f"Chat mode failed: {e}")
-            await safe_reply_message(update.message, "Sorry, I couldn’t reply right now.")
+        reply = await ask_openai(msgs, max_tokens=350)
+
+        # 💬 Chỉ phản hồi text — không thêm nút menu
+        await safe_reply_message(update.message, trim(reply))
+
+        await log_event(context, "chat_message", uid, {"chars": len(text)})
+        await maybe_nudge(update, context, lang)
         return
+
+
+
 
 # =========================================================
    
@@ -1836,7 +1847,8 @@ def start_flask():
 
 def main():
     application = Application.builder().token(TELEGRAM_TOKEN).build()
-    application.add_handler(CommandHandler("start", start))
+    application.add_handler(CommandHandler("start", handle_start))
+    application.add_handler(CommandHandler("menu", handle_menu))
     application.add_handler(CommandHandler("help", help_cmd))
     application.add_handler(CallbackQueryHandler(on_cb))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
