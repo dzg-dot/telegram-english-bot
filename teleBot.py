@@ -92,16 +92,27 @@ BANNED_KEYWORDS = [
 GRADE_TO_CEFR = {"6": "A2", "7": "A2+", "8": "B1-", "9": "B1", "10": "B1+"}
 
 POLICY_CHAT = (
-    "You are a friendly English-learning tutor for grades 6–9 (CEFR A2–B1). "
-    "Answer only about English language learning: vocabulary, grammar, reading, writing, and speaking. "
-    "If the user asks about other school subjects (math, physics, chemistry, etc.), politely refuse and guide them to English topics. "
-    "Use plain text only (no markdown, no bold). Be concise and positive."
+    "You are a friendly and flexible English-learning assistant for students in grades 6–9 (CEFR A2–B1+). "
+    "Your role is to help them improve their English through natural conversation and interactive learning. "
+    "You may discuss any topic (school, hobbies, science, math, daily life, technology, current events, etc.) "
+    "as long as you use English that matches their level. "
+    "You can briefly use the student's native language (Russian) for short clarifications or translations, "
+    "but most of your reply should remain in simple English."
+    "If the student asks for an explanation, dialogue, or story — respond fully and clearly. "
+    "If the message sounds like casual chat, reply briefly and naturally. "
+    "You can discuss academic topics *in English* for learning purposes, "
+    "but do not perform calculations, write code, or complete homework tasks. "
+    "Keep your tone friendly, supportive, and age-appropriate. "
+    "Use plain English only (no markdown, no bold)."
 )
+
 POLICY_STUDY = (
-    "You are an English teacher for middle-school students (A2–B1). "
-    "Use simple English, safe and age-appropriate content. "
+    "You are an English teacher for middle-school students (CEFR A2–B1+). "
+    "Use clear, simple English that matches their level. "
+    "Keep content safe, encouraging, and age-appropriate. "
     "No markdown or special formatting."
 )
+
 
 CYRILLIC_RE = re.compile(r"[А-Яа-яЁё]")
 
@@ -1402,7 +1413,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ✅ 2. Xác định intent sớm, trước khi xử lý grammar hint
     t = text.lower()
     intent = "chat"
-    if re.search(r"\bdefine\b|\bmeaning of\b", t):
+    if re.search(r"\bread\b|\btext\b|\bwrite\b|\btranslate\b|\bgloss\b", t):
+        intent = "reading"
+    elif re.search(r"\bdefine\b|\bmeaning of\b", t):
         intent = "vocab"
     elif re.search(r"\bgrammar\b|\btense\b|\bexplain\b|\brule\b", t):
         intent = "grammar"
@@ -1412,9 +1425,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             intent = "talk"
         else:
             intent = "chat"   # vẫn coi là chat bình thường
-    elif re.search(r"\bread\b|\btext\b|\bwrite\b|\btranslate\b|\bgloss\b", t):
-        intent = "reading"
-
     elif re.search(r"\bquiz\b|\bpractice\b|\bexercise\b", t):
         intent = "practice"
 
@@ -1699,7 +1709,22 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # --- DEFAULT CHAT MODE ---
 
+    # --- DEFAULT CHAT MODE ---
     if intent == "chat":
+        word_count = len(re.findall(r"[A-Za-z]+", text))
+ 
+        # 🧩 Nếu học sinh gửi đoạn văn dài, gợi ý hành động
+        if word_count >= 60 and not re.search(r"\b(translate|gloss|summarize|explain|correct|question)\b", text, re.I):
+            msg = (
+                "I see a long text. Would you like me to summarize, check grammar, or explain it?"
+                if lang != "ru" else
+                "Я вижу длинный текст. Хочешь, я помогу с кратким изложением, грамматикой или объяснением?"
+            )
+            await safe_reply_message(update.message, msg)
+            await log_event(context, "long_text_detected", update.effective_user.id, {"words": word_count})
+            # ❗ Không return — để bot vẫn phản hồi như chat bình thường
+
+        # 🧠 Chat tự nhiên
         msgs = [
             {"role": "system", "content": POLICY_CHAT},
             {"role": "user", "content": text}
