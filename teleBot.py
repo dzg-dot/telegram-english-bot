@@ -104,6 +104,7 @@ POLICY_CHAT = (
     "but do not perform calculations, write code, or complete homework tasks. "
     "Keep your tone friendly, supportive, and age-appropriate. "
     "Use plain English only (no markdown, no bold)."
+    "Never use **, *, _, or other formatting markers. Output plain text only."
 )
 
 POLICY_STUDY = (
@@ -431,8 +432,10 @@ async def build_reading_gloss(text: str, ui_lang: str, translate_mode: bool = Tr
 
     prompt = (
         f"Gloss the given English text for A2–B1 learners:\n"
-        "- Keep the original English sentences.\n"
-        "- Select 12–15 useful English words or phrases (phrasal verbs, idioms, collocations).\n"
+        f"- Keep the original English sentences.\n"
+        f"- Select 12–15 useful or challenging English words and phrases.\n"
+        f"- Include verbs, adjectives, and nouns that carry key meaning.\n"
+        f"- Prefer idioms, phrasal verbs, collocations, or academic words.\n"
         f"- Enclose each English chunk in <angle brackets> and immediately add a short {gloss_lang} translation in parentheses.\n"
         "- Example: She <set up> (организовала) a small company.\n"
         "- Do NOT gloss every word, and do NOT use markdown.\n\n"
@@ -736,8 +739,13 @@ async def practice_summary(update: Update, context: ContextTypes.DEFAULT_TYPE):
         [InlineKeyboardButton("🏠 Back to menu", callback_data="menu:root")]
     ])
 
+    if st["type"] == "nudge_quiz":
+        reset_nudge(context)
+
     # --- Send summary ---
     await safe_reply_message(update.message, trim("\n".join(lines)), reply_markup=kb)
+
+    await reward_message(update, context, score, total, lang)
 
     # --- Log event ---
     await log_event(context, "practice_done", update.effective_user.id, {
@@ -1329,20 +1337,38 @@ async def talk_coach(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await log_event(context, "talk_message", update.effective_user.id,
                     {"topic": topic, "turns": state["turns"]})
 
+
+
 # --- Nudge mini-quiz ---
 def increment_nudge(context):
+    """Tăng bộ đếm nudge mỗi khi học sinh hoàn thành 1 lượt học."""
     c = context.user_data.get("nudge", 0) + 1
     context.user_data["nudge"] = c
     return c
 
 def reset_nudge(context):
+    """Đặt lại bộ đếm nudge về 0."""
     context.user_data["nudge"] = 0
 
 async def maybe_nudge(update, context, lang):
+    """Chỉ gợi ý mini-quiz trong các chế độ học (vocab, grammar, reading)."""
+    # Kiểm tra intent hoặc scope hiện tại
+    st = context.user_data.get("practice", {})
+    mode = st.get("type") or context.user_data.get("mode", "")
+    allowed_modes = {"vocab", "grammar", "reading", "practice"}
+
+    # Nếu đang ở chat hoặc talk thì bỏ qua
+    if mode in {"chat", "talk"} or not any(k in mode for k in allowed_modes):
+        return
+
+    # Tăng bộ đếm và kiểm tra ngưỡng
     c = increment_nudge(context)
-    if c >= 3:
+    if c >= 4:  # 👉 xuất hiện sau 4 lượt học
         reset_nudge(context)
-        msg = "Do a quick 2-question mini-quiz?" if lang!="ru" else "Хочешь мини-викторину из 2 вопросов?"
+        msg = (
+            "Do a quick 2-question mini-quiz?" if lang != "ru"
+            else "Хочешь мини-викторину из 2 вопросов?"
+        )
         kb = InlineKeyboardMarkup([
             [InlineKeyboardButton("▶️ Start", callback_data="nudge:start"),
              InlineKeyboardButton("⏭ Skip", callback_data="nudge:skip")]
@@ -1511,6 +1537,19 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return await safe_reply_message(update.message, msg, reply_markup=main_menu(lang))
 
   
+        # --- LONG TEXT SAFEGUARD ---
+    word_count = len(re.findall(r"[A-Za-z]+", text))
+    if word_count >= 50 and intent == "vocab":
+        intent = "chat"  # chuyển về chat để hỏi ý người dùng
+        msg = (
+            "I see a long text. Would you like me to summarize, gloss, or check grammar?"
+            if lang != "ru" else
+            "Я вижу длинный текст. Хочешь, я помогу с кратким изложением, глоссой или грамматикой?"
+        )
+        await safe_reply_message(update.message, msg)
+        await log_event(context, "long_text_redirected", uid, {"words": word_count})
+        # Không return để bot vẫn có thể phản hồi tiếp
+
 
     # --- VOCABULARY ---
     if intent == "vocab":
@@ -1707,8 +1746,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 
-    # --- DEFAULT CHAT MODE ---
-
+   
     # --- DEFAULT CHAT MODE ---
     if intent == "chat":
         word_count = len(re.findall(r"[A-Za-z]+", text))
@@ -1738,6 +1776,57 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await maybe_nudge(update, context, lang)
         return
 
+
+# === NUDGE MINI-QUIZ CALLBACK ===
+    if data == "nudge:start":
+        reset_nudge(context)
+
+        # 📘 Xác định chủ đề và loại bài học gần nhất
+        last_practice = context.user_data.get("practice", {})
+        vocab_bank = context.user_data.get("vocab_bank", [])
+        topic = "general English"
+        flavor = "vocab_syn"  # mặc định nếu không xác định được
+
+        if last_practice:
+            # Nếu đang học grammar
+            if "grammar" in last_practice.get("type", ""):
+                topic = last_practice.get("topic", "grammar practice")
+                flavor = random.choice(["grammar_verb", "grammar_error", "grammar_order"])
+            # Nếu đang học reading
+            elif "reading" in last_practice.get("type", ""):
+                topic = last_practice.get("topic", "reading comprehension")
+                flavor = "reading_detail"
+            # Nếu đang học vocab
+            elif "vocab" in last_practice.get("type", "") or vocab_bank:
+                topic = vocab_bank[-1] if vocab_bank else "vocabulary"
+                flavor = random.choice(["vocab_syn", "vocab_cloze", "vocab_ant"])
+
+        await safe_edit_text(q, f"🧠 Starting a quick mini-quiz on {topic}!")
+
+        # 🧩 Sinh 2 câu hỏi mini
+        items = await build_mcq(topic, lang, prefs["cefr"], flavor=flavor)
+        items = items[:2]
+
+        if not items:
+            return await safe_reply_message(
+                update.callback_query.message,
+                "⚠️ Couldn't build the quiz. Try again later.",
+                reply_markup=main_menu(lang)
+            )
+
+        context.user_data["practice"] = {
+            "type": "nudge_quiz",
+            "topic": topic,
+            "items": items,
+            "idx": 0,
+            "score": 0,
+            "ui_lang": lang,
+            "scope": "mini"
+        }
+
+        await send_practice_item(update.callback_query, context)
+        await log_event(context, "nudge_quiz_start", uid, {"topic": topic, "flavor": flavor})
+        return
 
 
 
