@@ -1415,26 +1415,30 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await log_event(context, "out_of_scope", uid, {"query": text})
             return
 
-# --- AUTO GRAMMAR HINT  ---
-    grammar_hints = [
-        (r"\b(am|is|are)\s+\w+ing\b", "Present Continuous — be + V-ing for actions happening now."),
-        (r"\b(was|were)\s+\w+ing\b", "Past Continuous — was/were + V-ing for actions in progress in the past."),
-        (r"\b(has|have)\s+\w+(ed|en)\b", "Present Perfect — have/has + V3 for experiences or recent results."),
-        (r"\bhad\s+\w+(ed|en)\b", "Past Perfect — had + V3 for actions before another past."),
-        (r"\bwill\s+\w+\b", "Future Simple — will + base verb for future predictions."),
-        (r"\b(am|is|are|was|were|been|be)\s+\w+(ed|en)\b", "Passive Voice — be + V3 (object focus)."),
-        (r"\b(should|must|can|could|may|might|shall|will|would)\b", "Modal verbs — use base form after modal."),
-        (r"\bif\b.*\bwill\b", "First Conditional — If + Present, will + V."),
-        (r"\bif\b.*\bwould\b", "Second Conditional — If + Past, would + V."),
-        (r"\bif\b.*\bhad\b", "Third Conditional — If + Past Perfect, would have + V3."),
-        (r"\b(er than|more .+ than)\b", "Comparatives — adjective + than."),
-        (r"\b(the .+est|the most)\b", "Superlatives — the + adj-est / the most + adjective."),
-    ]
-    for pattern, hint in grammar_hints:
-        if re.search(pattern, text, re.I):
-            await safe_reply_message(update.message, f"💡 Grammar hint: {hint}")
-            await log_event(context, "grammar_hint", update.effective_user.id, {"hint": hint})
-            break
+    # --- AUTO GRAMMAR HINT  ---
+    word_count = len(re.findall(r"[A-Za-z]+", text))
+
+    # ❌ Không bật grammar hint cho text dài hoặc các mode không học ngữ pháp
+    if word_count < 40 and prefs.get("mode") not in ("talk", "chat"):
+        grammar_hints = [
+            (r"\b(am|is|are)\s+\w+ing\b", "Present Continuous — be + V-ing for actions happening now."),
+            (r"\b(was|were)\s+\w+ing\b", "Past Continuous — was/were + V-ing for actions in progress in the past."),
+            (r"\b(has|have)\s+\w+(ed|en)\b", "Present Perfect — have/has + V3 for experiences or recent results."),
+            (r"\bhad\s+\w+(ed|en)\b", "Past Perfect — had + V3 for actions before another past."),
+            (r"\bwill\s+\w+\b", "Future Simple — will + base verb for future predictions."),
+            (r"\b(am|is|are|was|were|been|be)\s+\w+(ed|en)\b", "Passive Voice — be + V3 (object focus)."),
+            (r"\b(should|must|can|could|may|might|shall|will|would)\b", "Modal verbs — use base form after modal."),
+            (r"\bif\b.*\bwill\b", "First Conditional — If + Present, will + V."),
+            (r"\bif\b.*\bwould\b", "Second Conditional — If + Past, would + V."),
+            (r"\bif\b.*\bhad\b", "Third Conditional — If + Past Perfect, would have + V3."),
+            (r"\b(er than|more .+ than)\b", "Comparatives — adjective + than."),
+            (r"\b(the .+est|the most)\b", "Superlatives — the + adj-est / the most + adjective."),
+        ]
+        for pattern, hint in grammar_hints:
+            if re.search(pattern, text, re.I):
+                await safe_reply_message(update.message, f"💡 Grammar hint: {hint}")
+                await log_event(context, "grammar_hint", update.effective_user.id, {"hint": hint})
+                break
 
 # ✅ 2. Xác định intent sớm, trước khi xử lý grammar hint
     t = text.lower()
