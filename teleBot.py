@@ -741,6 +741,7 @@ async def send_practice_item(update_or_query, context: ContextTypes.DEFAULT_TYPE
         await safe_edit_text(update_or_query, txt, reply_markup=kb)
 
 
+  
 # =========================================================
 async def practice_summary(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Show practice results with explanations, reward line, and next-step buttons."""
@@ -2202,6 +2203,8 @@ def start_flask():
 
 def main():
     application = Application.builder().token(TELEGRAM_TOKEN).build()
+
+    # --- Add handlers ---
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("menu", handle_menu))
     application.add_handler(CommandHandler("help", help_cmd))
@@ -2210,8 +2213,13 @@ def main():
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     application.add_handler(MessageHandler(filters.PHOTO, handle_image))
     application.add_error_handler(on_error)
-    application.post_init = on_startup
-    threading = asyncio.get_event_loop().create_task(asyncio.to_thread(start_flask))
+
+    # --- 🔹 Gọi hàm on_startup để xóa webhook cũ ---
+    asyncio.run(on_startup(application))
+
+    # --- 🔹 Chạy Flask song song ---
+    asyncio.create_task(asyncio.to_thread(start_flask))
+
     logger.info("🚀 Bot starting: English Tutor v2 ready for class!")
     application.run_polling(allowed_updates=Update.ALL_TYPES, drop_pending_updates=True)
 
