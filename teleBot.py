@@ -2212,26 +2212,23 @@ app = Flask(__name__)
 
 @app.get("/")
 def health():
-    return "✅ AI English Tutor v2 is alive", 200
+    return "✅ Bot alive", 200
 
+# --- Start Flask in background ---
 def start_flask():
-    port = int(os.getenv("PORT", "10000"))
-    app.run(host="0.0.0.0", port=port)
+    app.run(host="0.0.0.0", port=10000)
 
-import threading, asyncio, requests, time
+# --- Main entrypoint ---
+def main():
+    from telegram import Update
+    from telegram.ext import (
+        Application, CommandHandler, MessageHandler,
+        CallbackQueryHandler, filters
+    )
 
-# 🟩 Keep-alive để Render không ngủ
-def keep_alive():
-    while True:
-        try:
-            requests.get("https://<tên-app>.onrender.com")
-        except Exception:
-            pass
-        time.sleep(300)  # Ping mỗi 5 phút
-
-
-def start_polling():
     application = Application.builder().token(TELEGRAM_TOKEN).build()
+
+    # Add handlers
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("menu", handle_menu))
     application.add_handler(CommandHandler("help", help_cmd))
@@ -2239,25 +2236,18 @@ def start_polling():
     application.add_handler(CallbackQueryHandler(on_cb))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     application.add_handler(MessageHandler(filters.PHOTO, handle_image))
-    application.add_error_handler(on_error)
 
-    async def init_bot():
-        await application.bot.delete_webhook(drop_pending_updates=True)
-        logger.info("Webhook deleted, bot ready for polling.")
+    # Delete webhook first
+    asyncio.run(application.bot.delete_webhook(drop_pending_updates=True))
+    print("✅ Webhook deleted, ready for polling.")
 
-    asyncio.run(init_bot())
-
-    logger.info("🚀 Starting Telegram polling loop...")
-    application.run_polling(allowed_updates=Update.ALL_TYPES, drop_pending_updates=True)
-
-
-def main():
-    # --- Chạy polling trong thread riêng ---
-    threading.Thread(target=start_polling, daemon=True).start()
-
-    # --- Chạy Flask trong main thread ---
+    # Run Flask + keep-alive in background
+    threading.Thread(target=start_flask, daemon=True).start()
     threading.Thread(target=keep_alive, daemon=True).start()
-    start_flask()
+
+    # Run polling on main thread (this keeps bot active)
+    print("🚀 Starting polling loop...")
+    application.run_polling(allowed_updates=Update.ALL_TYPES, drop_pending_updates=True)
 
 if __name__ == "__main__":
     main()
