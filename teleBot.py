@@ -2217,8 +2217,8 @@ def main():
     # --- 🔹 Gọi hàm on_startup để xóa webhook cũ ---
     asyncio.run(on_startup(application))
 
-    # --- 🔹 Chạy Flask song song ---
-    asyncio.create_task(asyncio.to_thread(start_flask))
+    # --- 🔹 Chạy Flask song song trong thread riêng (Render friendly) ---
+    threading.Thread(target=start_flask, daemon=True).start()
 
     logger.info("🚀 Bot starting: English Tutor v2 ready for class!")
     application.run_polling(allowed_updates=Update.ALL_TYPES, drop_pending_updates=True)
