@@ -5,7 +5,6 @@
 # =========================================================
 import os, re, json, time, hmac, hashlib, logging, asyncio, uuid, difflib
 from datetime import datetime, timezone
-import threading
 
 import httpx
 from dotenv import load_dotenv
@@ -2209,9 +2208,22 @@ def start_flask():
     app.run(host="0.0.0.0", port=port)
 
 import asyncio
+import multiprocessing
+import threading, requests
+
+def keep_alive():
+    """Ping định kỳ để Render không tắt app sau khi idle."""
+    while True:
+        try:
+            # 🔁 thay YOUR_APP_NAME bằng tên Render app thật (không có https://)
+            requests.get("https://YOUR_APP_NAME.onrender.com")
+        except Exception:
+            pass
+        time.sleep(300)  # ping mỗi 5 phút (300 giây)
+
 
 def main():
-    """Khởi chạy Flask và Telegram bot song song — bản ổn định nhất cho Render."""
+    """Chạy Flask song song với Telegram bot (ổn định + auto keep-alive)."""
     # --- 1️⃣ Tạo ứng dụng Telegram ---
     application = Application.builder().token(TELEGRAM_TOKEN).build()
 
@@ -2227,25 +2239,18 @@ def main():
 
     # --- 3️⃣ Xóa webhook cũ ---
     asyncio.run(on_startup(application))
+
+    # --- 4️⃣ Chạy Flask trong process riêng ---
+    flask_process = multiprocessing.Process(target=start_flask, daemon=True)
+    flask_process.start()
+
+    # --- 5️⃣ Bật keep-alive ping Render mỗi 5 phút ---
+    threading.Thread(target=keep_alive, daemon=True).start()
+
     logger.info("🚀 Bot starting: English Tutor v2 ready for class!")
 
-    # --- 4️⃣ Chạy Flask trong thread riêng ---
-    flask_thread = threading.Thread(target=start_flask, daemon=True)
-    flask_thread.start()
-
-    # --- 5️⃣ Tạo event loop mới cho bot ---
-    async def run_bot():
-        await application.initialize()
-        await application.start()
-        await application.updater.start_polling(drop_pending_updates=True)
-        await application.updater.idle()
-
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-    try:
-        loop.run_until_complete(run_bot())
-    finally:
-        loop.close()
+    # --- 6️⃣ Chạy bot (polling) trong main process ---
+    application.run_polling(allowed_updates=Update.ALL_TYPES, drop_pending_updates=True)
 
 if __name__ == "__main__":
     main()
