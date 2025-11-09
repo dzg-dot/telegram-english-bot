@@ -2207,27 +2207,8 @@ def start_flask():
     port = int(os.getenv("PORT", "10000"))
     app.run(host="0.0.0.0", port=port)
 
-import asyncio
-import multiprocessing
-import threading, requests
-
-def keep_alive():
-    """Ping định kỳ để Render không tắt app sau khi idle."""
-    while True:
-        try:
-            # 🔁 thay YOUR_APP_NAME bằng tên Render app thật (không có https://)
-            requests.get("https://YOUR_APP_NAME.onrender.com")
-        except Exception:
-            pass
-        time.sleep(300)  # ping mỗi 5 phút (300 giây)
-
-
 def main():
-    """Chạy Flask song song với Telegram bot (ổn định + auto keep-alive)."""
-    # --- 1️⃣ Tạo ứng dụng Telegram ---
     application = Application.builder().token(TELEGRAM_TOKEN).build()
-
-    # --- 2️⃣ Gắn handler ---
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("menu", handle_menu))
     application.add_handler(CommandHandler("help", help_cmd))
@@ -2237,19 +2218,19 @@ def main():
     application.add_handler(MessageHandler(filters.PHOTO, handle_image))
     application.add_error_handler(on_error)
 
-    # --- 3️⃣ Xóa webhook cũ ---
+    # --- Xóa webhook cũ trước khi polling ---
     asyncio.run(on_startup(application))
 
-    # --- 4️⃣ Chạy Flask trong process riêng ---
-    flask_process = multiprocessing.Process(target=start_flask, daemon=True)
-    flask_process.start()
+    # --- Chạy Flask song song bằng luồng riêng ---
+    import threading
+    threading.Thread(target=start_flask, daemon=True).start()
 
-    # --- 5️⃣ Bật keep-alive ping Render mỗi 5 phút ---
-    threading.Thread(target=keep_alive, daemon=True).start()
+    # --- Tạo event loop mới để tránh lỗi ---
+    import asyncio
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
 
     logger.info("🚀 Bot starting: English Tutor v2 ready for class!")
-
-    # --- 6️⃣ Chạy bot (polling) trong main process ---
     application.run_polling(allowed_updates=Update.ALL_TYPES, drop_pending_updates=True)
 
 if __name__ == "__main__":
