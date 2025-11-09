@@ -609,7 +609,7 @@ async def build_mcq(topic_or_text: str, ui_lang: str, level: str, flavor: str = 
         "reading_inference": (
             "Write 5 MCQs testing INFERENCE — what can be understood but not directly stated. "
             "Each question has 4 choices and a short explanation."
-        ),x`
+        ),
         "reading_vocabcontext": (
             "Write 5 MCQs about VOCABULARY IN CONTEXT. "
             "Each question quotes a short sentence and asks the meaning of one word or phrase."
