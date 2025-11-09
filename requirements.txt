@@ -1,3 +1,4 @@
+pip>=25.3
 # --- Telegram & AI ---
 python-telegram-bot==21.6
 openai==1.52.2
@@ -8,8 +9,8 @@ Flask==3.0.3
 requests==2.32.3
 
 # --- OCR & Image ---
-pytesseract==0.3.10
-Pillow==10.3.0
+pytesseract==0.3.9
+Pillow==10.2.0
 
 # --- Env & Utils ---
 python-dotenv==1.0.1
