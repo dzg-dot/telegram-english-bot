@@ -706,7 +706,6 @@ async def send_practice_item(update_or_query, context: ContextTypes.DEFAULT_TYPE
     question = q.get("question", "").strip()
     options = q.get("options", [])
     if not options:
-        # nếu câu hỏi không có đáp án thì bỏ qua
         msg_target = (
             update_or_query.message
             if isinstance(update_or_query, Update)
@@ -719,7 +718,7 @@ async def send_practice_item(update_or_query, context: ContextTypes.DEFAULT_TYPE
     wrapped_q = (question[:3800] + "..." if len(question) > 3800 else question)
     txt = header + wrapped_q + "\n\n"
 
-    # --- Thêm các lựa chọn ---
+   # --- Thêm các lựa chọn ---
     letters = ["A", "B", "C", "D"]
     for i, opt in enumerate(options):
         clean_opt = opt.strip().replace("\n", " ")
@@ -727,7 +726,7 @@ async def send_practice_item(update_or_query, context: ContextTypes.DEFAULT_TYPE
             clean_opt = clean_opt[:300] + "..."
         txt += f"{letters[i]}) {clean_opt}\n"
 
-    # --- Nút chọn đáp án ---
+    # --- Nút chọn đáp án (2 hàng) ---
     kb = InlineKeyboardMarkup([
         [InlineKeyboardButton("A", callback_data="ans:A"),
          InlineKeyboardButton("B", callback_data="ans:B")],
@@ -735,13 +734,7 @@ async def send_practice_item(update_or_query, context: ContextTypes.DEFAULT_TYPE
          InlineKeyboardButton("D", callback_data="ans:D")]
     ])
 
-    # --- Gửi hoặc chỉnh sửa tin nhắn ---
-    if isinstance(update_or_query, Update):
-        await safe_reply_message(update_or_query.message, txt, reply_markup=kb)
-    else:
-        await safe_edit_text(update_or_query, txt, reply_markup=kb)
-
-    # --- Send or edit safely ---
+    # --- Gửi hoặc chỉnh sửa tin nhắn (chỉ 1 lần duy nhất) ---
     if isinstance(update_or_query, Update):
         await safe_reply_message(update_or_query.message, txt, reply_markup=kb)
     else:
@@ -1075,10 +1068,8 @@ async def on_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         # 🧩 Sinh 3 câu hỏi nhỏ về từ vừa tra
         flavors = ["vocab_synonyms", "vocab_antonyms", "vocab_context"]
-        all_items = []
-        for f in flavors:
-            sub = await build_mcq(word, lang, prefs["cefr"], flavor=f)
-            all_items.extend(sub[:1])
+        items = await build_mcq(word, lang, prefs["cefr"], flavor=flavor)
+        items = items[:3] 
 
         # 🔍 Lọc trùng câu hỏi nếu có
         seen = set()
