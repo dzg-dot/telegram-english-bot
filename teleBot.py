@@ -2202,6 +2202,7 @@ def start_flask():
     port = int(os.getenv("PORT", "10000"))
     app.run(host="0.0.0.0", port=port)
 
+import asyncio
 def main():
     application = Application.builder().token(TELEGRAM_TOKEN).build()
 
