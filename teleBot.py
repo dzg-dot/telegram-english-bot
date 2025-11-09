@@ -308,6 +308,7 @@ async def handle_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Hiển thị lại menu chính khi người dùng gõ /menu"""
     prefs = get_prefs(update.effective_user.id)
     prefs["mode"] = "chat"          # 🟢 Reset mode ngay
+    context.user_data.clear()
     reset_nudge(context)            # 🟢 Reset bộ đếm quiz mini
     
     lang = prefs.get("lang", "en")
@@ -658,20 +659,25 @@ async def build_mcq(topic_or_text: str, ui_lang: str, level: str, flavor: str = 
 
 # =========================================================
 async def send_practice_item(update_or_query, context: ContextTypes.DEFAULT_TYPE):
-    """Send a multiple-choice question with safe text wrapping and full option display."""
+    """Gửi câu hỏi với 4 lựa chọn A–D."""
     st = context.user_data.get("practice")
     if not st:
         return
-
     idx = st["idx"]
     q = st["items"][idx]
     total = len(st["items"])
 
-    txt = f"📘 Q{idx+1}/{total}\n\n{q['question']}\n\n"
-    for i, opt in enumerate(q["options"]):
-        # Loại bỏ nhãn A)/B)/C)/D) nếu model đã thêm
-        clean_opt = re.sub(r"^[A-D][.)]\s*", "", opt.strip())
-        txt += f"{chr(65+i)}) {clean_opt}\n"
+    txt = f"Q{idx+1}/{total}\n\n{q['question']}\n"
+    opts = q["options"]
+    for i, opt in enumerate(["A", "B", "C", "D"]):
+        txt += f"{opt}) {opts[i]}\n"
+
+    kb = mcq_buttons(opts)
+
+    if isinstance(update_or_query, Update):
+        await safe_reply_message(update_or_query.message, txt, reply_markup=kb)
+    else:
+        await safe_edit_text(update_or_query, txt, reply_markup=kb)
 
 
     # --- Build question text safely ---
@@ -800,11 +806,21 @@ async def on_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
     prefs = get_prefs(uid)
     lang = prefs.get("lang", "en")
 
+
+    if data == "clear:chat":
+        try:
+            await clear_chat(update, context)
+        except Exception as e:
+            logger.warning(f"Callback clear_chat failed: {e}")
+            await safe_edit_text(q, "⚠️ Couldn't clear chat history.", reply_markup=main_menu(lang))
+        return
+
     # === MENU ROOT ===
     if data == "menu:root":
         prefs["mode"] = "chat"
-        context.user_data.clear()
-        msg = "Back to main menu." if lang != "ru" else "Возврат в меню."
+        context.user_data.clear()     # 🧹 Xóa mọi state cũ (practice, talk, vocab_bank,…)
+        reset_nudge(context)
+        msg = "📋 Back to main menu." if lang != "ru" else "Возврат в меню."
         await safe_edit_text(q, msg, reply_markup=main_menu(lang))
         await log_event(context, "menu_root", uid, {})
         return
@@ -862,7 +878,7 @@ async def on_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     # === MAIN PRACTICE MENU ===
-    if data == "menu:practice":
+    if data == "practice:menu":
         txt = "Choose a practice category:" if lang != "ru" else "Выберите категорию практики:"
         kb = InlineKeyboardMarkup([
             [InlineKeyboardButton("🧠 Vocabulary", callback_data="practice:vocab_menu")],
@@ -882,7 +898,7 @@ async def on_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
              InlineKeyboardButton("🧩 Word Formation", callback_data="practice:vocab:formation")],
             [InlineKeyboardButton("🪄 Collocations", callback_data="practice:vocab:collocations"),
              InlineKeyboardButton("🌀 Phrasal Verbs", callback_data="practice:vocab:phrasal")],
-            [InlineKeyboardButton("🔙 Back", callback_data="menu:practice")]
+            [InlineKeyboardButton("🔙 Back", callback_data="practice:menu")]
         ])
         await safe_edit_text(q, txt, reply_markup=kb)
         return
@@ -896,7 +912,7 @@ async def on_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
              InlineKeyboardButton("⛓ Conditionals", callback_data="practice:grammar:conditionals")],
             [InlineKeyboardButton("🗣 Modal Verbs", callback_data="practice:grammar:modals"),
              InlineKeyboardButton("📚 Mixed Grammar", callback_data="practice:grammar:mixed")],
-            [InlineKeyboardButton("🔙 Back", callback_data="menu:practice")]
+            [InlineKeyboardButton("🔙 Back", callback_data="practice:menu")]
         ])
         await safe_edit_text(q, txt, reply_markup=kb)
         return
@@ -909,7 +925,7 @@ async def on_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
             [InlineKeyboardButton("💭 Inference", callback_data="practice:reading:inference"),
              InlineKeyboardButton("🧠 Vocabulary in Context", callback_data="practice:reading:vocabcontext")],
             [InlineKeyboardButton("✏️ Cloze Passage", callback_data="practice:reading:cloze")],
-            [InlineKeyboardButton("🔙 Back", callback_data="menu:practice")]
+            [InlineKeyboardButton("🔙 Back", callback_data="practice:menu")]
         ])
         await safe_edit_text(q, txt, reply_markup=kb)
         return
@@ -1152,6 +1168,17 @@ async def on_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
 
+
+
+    def mcq_buttons(options):
+        """Tạo nút A/B/C/D cho câu hỏi hiện tại."""
+        return InlineKeyboardMarkup([
+            [InlineKeyboardButton("A", callback_data="ans:A"),
+             InlineKeyboardButton("B", callback_data="ans:B"),
+             InlineKeyboardButton("C", callback_data="ans:C"),
+             InlineKeyboardButton("D", callback_data="ans:D")]
+        ])
+
     # === ANSWER HANDLING ===
     if data.startswith("ans:"):
         st = context.user_data.get("practice")
@@ -1184,7 +1211,9 @@ async def on_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not st.get("retry"):
             st["retry"] = True
             msg = "❌ Try again!" if ui_lang != "ru" else "❌ Попробуй ещё раз!"
-            return await safe_edit_text(q, msg, reply_markup=mcq_buttons(qitem["options"]))
+            await safe_edit_text(q, msg, reply_markup=mcq_buttons(qitem["options"]))
+            await asyncio.sleep(0.3)
+            return 
 
         # --- ❌ Sai lần 2 ---
         st["retry"] = False
