@@ -2211,12 +2211,11 @@ def start_flask():
 import asyncio
 
 def main():
-    """Khởi chạy Flask và Telegram bot song song (ổn định trên Render / Python 3.13)."""
-
-    # --- Khởi tạo ứng dụng Telegram ---
+    """Khởi chạy Flask và Telegram bot song song — bản ổn định nhất cho Render."""
+    # --- 1️⃣ Tạo ứng dụng Telegram ---
     application = Application.builder().token(TELEGRAM_TOKEN).build()
 
-    # --- Thêm các handler chính ---
+    # --- 2️⃣ Gắn handler ---
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("menu", handle_menu))
     application.add_handler(CommandHandler("help", help_cmd))
@@ -2226,28 +2225,27 @@ def main():
     application.add_handler(MessageHandler(filters.PHOTO, handle_image))
     application.add_error_handler(on_error)
 
-    # --- Xóa webhook cũ trước khi polling ---
+    # --- 3️⃣ Xóa webhook cũ ---
     asyncio.run(on_startup(application))
-
     logger.info("🚀 Bot starting: English Tutor v2 ready for class!")
 
-    # --- 🧠 Hàm chạy bot trong thread riêng ---
-    def run_polling():
-        async def _run():
-            await application.initialize()
-            await application.start()
-            await application.updater.start_polling(drop_pending_updates=True)
-            await application.updater.idle()
+    # --- 4️⃣ Chạy Flask trong thread riêng ---
+    flask_thread = threading.Thread(target=start_flask, daemon=True)
+    flask_thread.start()
 
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        loop.run_until_complete(_run())
+    # --- 5️⃣ Tạo event loop mới cho bot ---
+    async def run_bot():
+        await application.initialize()
+        await application.start()
+        await application.updater.start_polling(drop_pending_updates=True)
+        await application.updater.idle()
 
-    # --- 🚀 Chạy polling trong thread riêng ---
-    threading.Thread(target=run_polling, daemon=True).start()
-
-    # --- 🌐 Chạy Flask trong main thread ---
-    start_flask()
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    try:
+        loop.run_until_complete(run_bot())
+    finally:
+        loop.close()
 
 if __name__ == "__main__":
     main()
