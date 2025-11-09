@@ -2218,14 +2218,8 @@ def health():
 def start_flask():
     app.run(host="0.0.0.0", port=10000)
 
-# --- Main entrypoint ---
-def main():
-    from telegram import Update
-    from telegram.ext import (
-        Application, CommandHandler, MessageHandler,
-        CallbackQueryHandler, filters
-    )
-
+# --- Async polling runner ---
+async def run_bot():
     application = Application.builder().token(TELEGRAM_TOKEN).build()
 
     # Add handlers
@@ -2236,21 +2230,26 @@ def main():
     application.add_handler(CallbackQueryHandler(on_cb))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     application.add_handler(MessageHandler(filters.PHOTO, handle_image))
+    application.add_error_handler(on_error)
 
-    # Delete webhook first
-    asyncio.run(application.bot.delete_webhook(drop_pending_updates=True))
+    # Delete webhook before polling
+    await application.bot.delete_webhook(drop_pending_updates=True)
     print("✅ Webhook deleted, ready for polling.")
 
-    # Run Flask + keep-alive in background
+    # Start polling properly (no closed loop errors)
+    print("🚀 Starting async polling loop...")
+    await application.initialize()
+    await application.start()
+    await application.updater.start_polling(allowed_updates=Update.ALL_TYPES, drop_pending_updates=True)
+    await application.updater.wait()  # Keeps loop alive
+
+def main():
+    # Start Flask + keep-alive in background
     threading.Thread(target=start_flask, daemon=True).start()
     threading.Thread(target=keep_alive, daemon=True).start()
 
-    # Run polling on main thread (this keeps bot active)
-    print("🚀 Starting polling loop...")
-    # 🔧 Tạo & gắn event loop (Python 3.13 cần bước này)
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-    application.run_polling(allowed_updates=Update.ALL_TYPES, drop_pending_updates=True)
+    # Run bot asynchronously
+    asyncio.run(run_bot())
 
 if __name__ == "__main__":
     main()
