@@ -2230,11 +2230,8 @@ def keep_alive():
         time.sleep(300)  # Ping mỗi 5 phút
 
 
-def main():
-    # --- Tạo Telegram application ---
+def start_polling():
     application = Application.builder().token(TELEGRAM_TOKEN).build()
-
-    # --- Gán handlers ---
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("menu", handle_menu))
     application.add_handler(CommandHandler("help", help_cmd))
@@ -2244,21 +2241,23 @@ def main():
     application.add_handler(MessageHandler(filters.PHOTO, handle_image))
     application.add_error_handler(on_error)
 
-    # --- Hàm async nhỏ để xóa webhook ---
     async def init_bot():
         await application.bot.delete_webhook(drop_pending_updates=True)
         logger.info("Webhook deleted, bot ready for polling.")
 
-    # Gọi init_bot() an toàn (không đóng event loop chính)
     asyncio.run(init_bot())
 
-    # --- Chạy Flask và keep_alive song song ---
-    threading.Thread(target=start_flask, daemon=True).start()
-    threading.Thread(target=keep_alive, daemon=True).start()
-
-    # --- Cuối cùng: chạy polling ---
-    logger.info("🚀 Bot starting: English Tutor v2 ready for class!")
+    logger.info("🚀 Starting Telegram polling loop...")
     application.run_polling(allowed_updates=Update.ALL_TYPES, drop_pending_updates=True)
+
+
+def main():
+    # --- Chạy polling trong thread riêng ---
+    threading.Thread(target=start_polling, daemon=True).start()
+
+    # --- Chạy Flask trong main thread ---
+    threading.Thread(target=keep_alive, daemon=True).start()
+    start_flask()
 
 if __name__ == "__main__":
     main()
