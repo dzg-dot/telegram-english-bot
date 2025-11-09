@@ -2222,7 +2222,7 @@ def start_flask():
 async def run_bot():
     application = Application.builder().token(TELEGRAM_TOKEN).build()
 
-    # Add handlers
+    # Handlers
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("menu", handle_menu))
     application.add_handler(CommandHandler("help", help_cmd))
@@ -2232,16 +2232,30 @@ async def run_bot():
     application.add_handler(MessageHandler(filters.PHOTO, handle_image))
     application.add_error_handler(on_error)
 
-    # Delete webhook before polling
+    # Gỡ webhook trước khi polling
     await application.bot.delete_webhook(drop_pending_updates=True)
     print("✅ Webhook deleted, ready for polling.")
-
-    # Start polling properly (no closed loop errors)
     print("🚀 Starting async polling loop...")
+
+    # Khởi động theo cách "thủ công" an toàn với Python 3.13
     await application.initialize()
     await application.start()
-    await application.updater.start_polling(allowed_updates=Update.ALL_TYPES, drop_pending_updates=True)
-    await application.updater.wait()  # Keeps loop alive
+    await application.updater.start_polling(
+        allowed_updates=Update.ALL_TYPES, drop_pending_updates=True
+    )
+    print("✅ Polling started.")
+
+    # Block vòng lặp (thay cho Updater.wait())
+    stop_event = asyncio.Event()
+    try:
+        await stop_event.wait()   # chặn mãi cho tới khi service bị stop
+    except (KeyboardInterrupt, SystemExit):
+        pass
+    finally:
+        # shutdown gọn gàng
+        await application.updater.stop()
+        await application.stop()
+        await application.shutdown()
 
 def main():
     # Start Flask + keep-alive in background
