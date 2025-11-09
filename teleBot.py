@@ -974,7 +974,6 @@ async def on_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
     # === PRACTICE TYPE HANDLER ===
-        # === MODE PRACTICE (Vocabulary / Grammar / Reading) ===
     if data.startswith("practice:vocab:") or data.startswith("practice:grammar:") or data.startswith("practice:reading:"):
         try:
             _, group, flavor = data.split(":")
@@ -1055,7 +1054,65 @@ async def on_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
     # === VOCAB PRACTICE ===
-   
+       # === VOCABULARY QUICK QUIZ (Practice this word) ===
+    if data == "vocab:practice":
+        word = context.user_data.get("last_word", "").strip()
+        if not word:
+            return await safe_edit_text(
+                q,
+                "Please define a word first.",
+                reply_markup=main_menu(lang)
+            )
+
+        # 🧩 Sinh 3 câu hỏi nhỏ về từ vừa tra
+        flavors = ["vocab_syn", "vocab_ant", "vocab_cloze"]
+        all_items = []
+        for f in flavors:
+            sub = await build_mcq(word, lang, prefs["cefr"], flavor=f)
+            all_items.extend(sub[:1])
+
+        # 🔍 Lọc trùng câu hỏi nếu có
+        seen = set()
+        unique_items = []
+        for qu in all_items:
+            text = qu.get("question", "").strip().lower()
+            if text and text not in seen:
+                seen.add(text)
+                unique_items.append(qu)
+
+        # 🔢 Gán lại ID theo thứ tự
+        for i, qu in enumerate(unique_items, start=1):
+            qu["id"] = i
+
+        # 🎯 Giới hạn 3 câu hỏi
+        items = unique_items[:3]
+
+        if not items:
+            return await safe_edit_text(
+                q,
+                "⚠️ No quiz available.",
+                reply_markup=main_menu(lang)
+            )
+
+        # 💾 Lưu trạng thái quiz
+        context.user_data["practice"] = {
+            "type": "vocab",
+            "topic": word,
+            "items": items,
+            "idx": 0,
+            "score": 0,
+            "ui_lang": lang,
+            "scope": "vocab_direct"
+        }
+
+        # 📍 Đánh dấu đang ở layer bài tập độc lập
+        context.user_data["menu_layer"] = "exercise"
+
+        # 🚀 Gửi câu hỏi đầu tiên
+        await send_practice_item(q, context)
+        await log_event(context, "vocab_practice", uid, {"word": word})
+        return
+
         # === VOCAB MORE EXAMPLES (B1+ level) ===
     if data == "vocab:more":
         word = (context.user_data.get("last_word") or "").strip()
