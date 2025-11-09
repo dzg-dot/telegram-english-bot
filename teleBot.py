@@ -2247,6 +2247,9 @@ def main():
 
     # Run polling on main thread (this keeps bot active)
     print("🚀 Starting polling loop...")
+    # 🔧 Tạo & gắn event loop (Python 3.13 cần bước này)
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
     application.run_polling(allowed_updates=Update.ALL_TYPES, drop_pending_updates=True)
 
 if __name__ == "__main__":
