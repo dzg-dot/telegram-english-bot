@@ -46,9 +46,15 @@ async def on_error(update: object, context: ContextTypes.DEFAULT_TYPE):
         pass
 
 async def on_startup(app: Application):
-    await app.bot.delete_webhook(drop_pending_updates=True)
-    logger.info("Webhook deleted, bot ready for polling.")
-
+    """
+    Gọi 1 lần khi bot khởi động.
+    Dùng để xóa webhook cũ (nếu còn) để tránh lỗi 409 conflict.
+    """
+    try:
+        await app.bot.delete_webhook(drop_pending_updates=True)
+        logger.info("Webhook deleted, bot ready for polling.")
+    except Exception as e:
+        logger.warning(f"on_startup failed: {e}")
 
 # =========================================================
 # 2) ENV & CLIENT SETUP
@@ -2203,6 +2209,7 @@ def start_flask():
     app.run(host="0.0.0.0", port=port)
 
 import asyncio
+
 def main():
     application = Application.builder().token(TELEGRAM_TOKEN).build()
 
@@ -2216,14 +2223,25 @@ def main():
     application.add_handler(MessageHandler(filters.PHOTO, handle_image))
     application.add_error_handler(on_error)
 
-    # --- 🔹 Gọi hàm on_startup để xóa webhook cũ ---
+    # --- Startup cleanup (xóa webhook cũ) ---
     asyncio.run(on_startup(application))
 
-    # --- 🔹 Chạy Flask song song trong thread riêng (Render friendly) ---
+    # --- Run Flask song song ---
     threading.Thread(target=start_flask, daemon=True).start()
 
     logger.info("🚀 Bot starting: English Tutor v2 ready for class!")
-    application.run_polling(allowed_updates=Update.ALL_TYPES, drop_pending_updates=True)
+
+    # --- 🔧 FIX CHÍNH: chạy polling thủ công trong event loop ---
+    async def run_bot():
+        await application.initialize()
+        await application.start()
+        await application.updater.start_polling(drop_pending_updates=True)
+        await application.updater.idle()
+
+    # Tạo loop mới cho polling
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    loop.run_until_complete(run_bot())
 
 if __name__ == "__main__":
     main()
