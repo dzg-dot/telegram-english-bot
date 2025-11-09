@@ -609,7 +609,7 @@ async def build_mcq(topic_or_text: str, ui_lang: str, level: str, flavor: str = 
         "reading_inference": (
             "Write 5 MCQs testing INFERENCE — what can be understood but not directly stated. "
             "Each question has 4 choices and a short explanation."
-        ),
+        ),x`
         "reading_vocabcontext": (
             "Write 5 MCQs about VOCABULARY IN CONTEXT. "
             "Each question quotes a short sentence and asks the meaning of one word or phrase."
@@ -693,43 +693,33 @@ async def build_mcq(topic_or_text: str, ui_lang: str, level: str, flavor: str = 
 
 # =========================================================
 async def send_practice_item(update_or_query, context: ContextTypes.DEFAULT_TYPE):
-    """Gửi câu hỏi với 4 lựa chọn A–D."""
+    """Gửi 1 câu hỏi trắc nghiệm (MCQ) có 4 lựa chọn A–D, hiển thị gọn và an toàn."""
     st = context.user_data.get("practice")
     if not st:
         return
+
     idx = st["idx"]
     q = st["items"][idx]
     total = len(st["items"])
-
-    txt = f"Q{idx+1}/{total}\n\n{q['question']}\n"
-    opts = q["options"]
-    for i, opt in enumerate(["A", "B", "C", "D"]):
-        if i < len(opts):
-            txt += f"{opt}) {opts[i]}\n"
-
-    kb = mcq_buttons(opts)
-
-    if isinstance(update_or_query, Update):
-        await safe_reply_message(update_or_query.message, txt, reply_markup=kb)
-    else:
-        await safe_edit_text(update_or_query, txt, reply_markup=kb)
-
 
     # --- Build question text safely ---
     question = q.get("question", "").strip()
     options = q.get("options", [])
     if not options:
-        return await safe_reply_message(
-            update_or_query.message if isinstance(update_or_query, Update) else update_or_query.message,
-            "⚠️ This question has no options."
+        # nếu câu hỏi không có đáp án thì bỏ qua
+        msg_target = (
+            update_or_query.message
+            if isinstance(update_or_query, Update)
+            else update_or_query.message
         )
+        return await safe_reply_message(msg_target, "⚠️ This question has no options.")
 
-    # Wrap long question text neatly
+    # --- Format hiển thị ---
     header = f"📘 Q{idx+1}/{total}\n\n"
     wrapped_q = (question[:3800] + "..." if len(question) > 3800 else question)
     txt = header + wrapped_q + "\n\n"
 
-    # Add formatted options (A–D)
+    # --- Thêm các lựa chọn ---
     letters = ["A", "B", "C", "D"]
     for i, opt in enumerate(options):
         clean_opt = opt.strip().replace("\n", " ")
@@ -737,14 +727,19 @@ async def send_practice_item(update_or_query, context: ContextTypes.DEFAULT_TYPE
             clean_opt = clean_opt[:300] + "..."
         txt += f"{letters[i]}) {clean_opt}\n"
 
-    # --- Inline buttons for answer selection ---
-    # Two rows for better visual spacing on mobile
+    # --- Nút chọn đáp án ---
     kb = InlineKeyboardMarkup([
         [InlineKeyboardButton("A", callback_data="ans:A"),
          InlineKeyboardButton("B", callback_data="ans:B")],
         [InlineKeyboardButton("C", callback_data="ans:C"),
          InlineKeyboardButton("D", callback_data="ans:D")]
     ])
+
+    # --- Gửi hoặc chỉnh sửa tin nhắn ---
+    if isinstance(update_or_query, Update):
+        await safe_reply_message(update_or_query.message, txt, reply_markup=kb)
+    else:
+        await safe_edit_text(update_or_query, txt, reply_markup=kb)
 
     # --- Send or edit safely ---
     if isinstance(update_or_query, Update):
@@ -919,6 +914,20 @@ async def on_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await log_event(context, "help_open", uid, {})
         return
 
+
+# === ENTER PRACTICE MENU FROM MAIN MENU ===
+    if data == "menu:practice":
+        txt = "Choose a practice category:" if lang != "ru" else "Выберите категорию практики:"
+        kb = InlineKeyboardMarkup([
+            [InlineKeyboardButton("🧠 Vocabulary", callback_data="practice:vocab_menu")],
+            [InlineKeyboardButton("⚙️ Grammar", callback_data="practice:grammar_menu")],
+            [InlineKeyboardButton("📖 Reading", callback_data="practice:reading_menu")],
+            [InlineKeyboardButton("🏠 Back to menu", callback_data="menu:root")]
+        ])
+        await safe_edit_text(q, txt, reply_markup=kb)
+        await log_event(context, "menu_practice_enter", uid, {})
+        return
+
     # === MAIN PRACTICE MENU ===
     if data == "practice:menu":
         txt = "Choose a practice category:" if lang != "ru" else "Выберите категорию практики:"
@@ -1065,7 +1074,7 @@ async def on_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
 
         # 🧩 Sinh 3 câu hỏi nhỏ về từ vừa tra
-        flavors = ["vocab_syn", "vocab_ant", "vocab_cloze"]
+        flavors = ["vocab_synonyms", "vocab_antonyms", "vocab_context"]
         all_items = []
         for f in flavors:
             sub = await build_mcq(word, lang, prefs["cefr"], flavor=f)
@@ -1156,7 +1165,7 @@ async def on_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return await safe_edit_text(q, "No grammar topic found.", reply_markup=main_menu(lang))
 
         # 🔹 Sinh 3 câu hỏi (mỗi loại 1 câu)
-        flavors = ["grammar_verb", "grammar_error", "grammar_order"]
+        flavors = ["grammar_verbs", "grammar_errors", "grammar_order"]
         all_items = []
         for f in flavors:
             sub = await build_mcq(topic, lang, prefs["cefr"], flavor=f)
