@@ -2211,9 +2211,12 @@ def start_flask():
 import asyncio
 
 def main():
+    """Khởi chạy Flask và Telegram bot song song (ổn định trên Render / Python 3.13)."""
+
+    # --- Khởi tạo ứng dụng Telegram ---
     application = Application.builder().token(TELEGRAM_TOKEN).build()
 
-    # --- Add handlers ---
+    # --- Thêm các handler chính ---
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("menu", handle_menu))
     application.add_handler(CommandHandler("help", help_cmd))
@@ -2223,25 +2226,28 @@ def main():
     application.add_handler(MessageHandler(filters.PHOTO, handle_image))
     application.add_error_handler(on_error)
 
-    # --- Startup cleanup (xóa webhook cũ) ---
+    # --- Xóa webhook cũ trước khi polling ---
     asyncio.run(on_startup(application))
-
-    # --- Run Flask song song ---
-    threading.Thread(target=start_flask, daemon=True).start()
 
     logger.info("🚀 Bot starting: English Tutor v2 ready for class!")
 
-    # --- 🔧 FIX CHÍNH: chạy polling thủ công trong event loop ---
-    async def run_bot():
-        await application.initialize()
-        await application.start()
-        await application.updater.start_polling(drop_pending_updates=True)
-        await application.updater.idle()
+    # --- 🧠 Hàm chạy bot trong thread riêng ---
+    def run_polling():
+        async def _run():
+            await application.initialize()
+            await application.start()
+            await application.updater.start_polling(drop_pending_updates=True)
+            await application.updater.idle()
 
-    # Tạo loop mới cho polling
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-    loop.run_until_complete(run_bot())
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        loop.run_until_complete(_run())
+
+    # --- 🚀 Chạy polling trong thread riêng ---
+    threading.Thread(target=run_polling, daemon=True).start()
+
+    # --- 🌐 Chạy Flask trong main thread ---
+    start_flask()
 
 if __name__ == "__main__":
     main()
