@@ -2208,6 +2208,9 @@ def start_flask():
     app.run(host="0.0.0.0", port=port)
 
 def main():
+    import asyncio   # ✅ THÊM DÒNG NÀY NGAY ĐẦU HÀM
+    import threading
+
     application = Application.builder().token(TELEGRAM_TOKEN).build()
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("menu", handle_menu))
@@ -2222,11 +2225,9 @@ def main():
     asyncio.run(on_startup(application))
 
     # --- Chạy Flask song song bằng luồng riêng ---
-    import threading
     threading.Thread(target=start_flask, daemon=True).start()
 
     # --- Tạo event loop mới để tránh lỗi ---
-    import asyncio
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
 
