@@ -17,6 +17,17 @@ from telegram.ext import (
     ContextTypes, filters
 )
 
+import threading, requests
+
+def keep_alive():
+    while True:
+        try:
+            requests.get("https://telegram-english-bot-1.onrender.com")
+        except Exception:
+            pass
+        time.sleep(300)
+
+
 # --- SIMPLE VOCAB BANK HANDLER ---
 def add_vocab_to_bank(context, word: str):
     """Lưu từ vựng vào bộ nhớ tạm (per-user)."""
@@ -2207,11 +2218,23 @@ def start_flask():
     port = int(os.getenv("PORT", "10000"))
     app.run(host="0.0.0.0", port=port)
 
-def main():
-    import asyncio   # ✅ THÊM DÒNG NÀY NGAY ĐẦU HÀM
-    import threading
+import threading, asyncio, requests, time
 
+# 🟩 Keep-alive để Render không ngủ
+def keep_alive():
+    while True:
+        try:
+            requests.get("https://<tên-app>.onrender.com")
+        except Exception:
+            pass
+        time.sleep(300)  # Ping mỗi 5 phút
+
+
+def main():
+    # --- Tạo Telegram application ---
     application = Application.builder().token(TELEGRAM_TOKEN).build()
+
+    # --- Gán handlers ---
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("menu", handle_menu))
     application.add_handler(CommandHandler("help", help_cmd))
@@ -2221,16 +2244,19 @@ def main():
     application.add_handler(MessageHandler(filters.PHOTO, handle_image))
     application.add_error_handler(on_error)
 
-    # --- Xóa webhook cũ trước khi polling ---
-    asyncio.run(on_startup(application))
+    # --- Hàm async nhỏ để xóa webhook ---
+    async def init_bot():
+        await application.bot.delete_webhook(drop_pending_updates=True)
+        logger.info("Webhook deleted, bot ready for polling.")
 
-    # --- Chạy Flask song song bằng luồng riêng ---
+    # Gọi init_bot() an toàn (không đóng event loop chính)
+    asyncio.run(init_bot())
+
+    # --- Chạy Flask và keep_alive song song ---
     threading.Thread(target=start_flask, daemon=True).start()
+    threading.Thread(target=keep_alive, daemon=True).start()
 
-    # --- Tạo event loop mới để tránh lỗi ---
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-
+    # --- Cuối cùng: chạy polling ---
     logger.info("🚀 Bot starting: English Tutor v2 ready for class!")
     application.run_polling(allowed_updates=Update.ALL_TYPES, drop_pending_updates=True)
 
