@@ -307,6 +307,9 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def handle_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Hiển thị lại menu chính khi người dùng gõ /menu"""
     prefs = get_prefs(update.effective_user.id)
+    prefs["mode"] = "chat"          # 🟢 Reset mode ngay
+    reset_nudge(context)            # 🟢 Reset bộ đếm quiz mini
+    
     lang = prefs.get("lang", "en")
     await safe_reply_message(update.message, "📋 Main menu:", reply_markup=main_menu(lang))
     await log_event(context, "menu_command", update.effective_user.id, {})
@@ -664,12 +667,12 @@ async def send_practice_item(update_or_query, context: ContextTypes.DEFAULT_TYPE
     q = st["items"][idx]
     total = len(st["items"])
 
-    # ✅ Làm sạch option: xóa mọi ký tự A)/B)/1./v.v.
-    cleaned_options = [re.sub(r"^[A-Da-d)\.\s]+", "", opt.strip()) for opt in q["options"]]
-
     txt = f"📘 Q{idx+1}/{total}\n\n{q['question']}\n\n"
-    for i, label in enumerate(["A", "B", "C", "D"]):
-        txt += f"{label}) {cleaned_options[i]}\n"
+    for i, opt in enumerate(q["options"]):
+        # Loại bỏ nhãn A)/B)/C)/D) nếu model đã thêm
+        clean_opt = re.sub(r"^[A-D][.)]\s*", "", opt.strip())
+        txt += f"{chr(65+i)}) {clean_opt}\n"
+
 
     # --- Build question text safely ---
     question = q.get("question", "").strip()
@@ -1161,7 +1164,7 @@ async def on_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
         correct = qitem["answer"]
         ui_lang = st.get("ui_lang", "en")
 
-        # --- Trường hợp đúng ---
+        # --- ✅ Trả lời đúng ---
         if choice == correct:
             st["score"] += 1
             st["retry"] = False
@@ -1177,13 +1180,13 @@ async def on_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await send_practice_item(q, context)
             return
 
-        # --- Trường hợp sai lần đầu ---
+        # --- ❌ Sai lần đầu ---
         if not st.get("retry"):
             st["retry"] = True
             msg = "❌ Try again!" if ui_lang != "ru" else "❌ Попробуй ещё раз!"
             return await safe_edit_text(q, msg, reply_markup=mcq_buttons(qitem["options"]))
 
-        # --- Trường hợp sai lần 2 ---
+        # --- ❌ Sai lần 2 ---
         st["retry"] = False
         msg = (f"❌ Correct answer: {correct}"
                if ui_lang != "ru"
@@ -1198,6 +1201,7 @@ async def on_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
         else:
             await send_practice_item(q, context)
         return
+
 
 
     # === FOOTER AGAIN CALLBACK ===
@@ -1327,6 +1331,25 @@ async def on_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 # =========================================================
+# CLEAR CHAT COMMAND
+async def clear_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Delete recent bot messages (clean interface)."""
+    chat_id = update.effective_chat.id
+    bot = context.bot
+
+    try:
+        async for msg in bot.get_chat_history(chat_id, limit=100):
+            # Chỉ xoá tin nhắn do bot gửi
+            if msg.from_user and msg.from_user.is_bot:
+                try:
+                    await bot.delete_message(chat_id, msg.message_id)
+                except Exception:
+                    pass  # bỏ qua lỗi nếu tin nhắn quá cũ hoặc không xoá được
+        await update.message.reply_text("✅ Chat cleared. Let’s start fresh!")
+    except Exception as e:
+        await update.message.reply_text(f"⚠️ Failed to clear chat: {e}")
+
+# =========================================================
 # 13) TALK COACH & NUDGE SYSTEM
 # =========================================================
 async def talk_coach(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1416,16 +1439,19 @@ def reset_nudge(context):
 
 async def maybe_nudge(update, context, lang):
     """Chỉ gợi ý mini-quiz trong các chế độ học (vocab, grammar, reading)."""
-    # Kiểm tra intent hoặc scope hiện tại
+    prefs = get_prefs(update.effective_user.id)
+    mode = prefs.get("mode", "chat")
     st = context.user_data.get("practice", {})
-    mode = st.get("type") or context.user_data.get("mode", "")
-    allowed_modes = {"vocab", "grammar", "reading", "practice"}
+    scope = st.get("scope", "")
 
-    # Nếu đang ở chat hoặc talk thì bỏ qua
-    if mode in {"chat", "talk"} or not any(k in mode for k in allowed_modes):
+    # Chỉ kích hoạt trong các mode học
+    allowed_scopes = {"vocab", "grammar", "reading", "practice"}
+
+    if mode in {"chat", "talk"}:
+        return
+    if not any(scope.startswith(a) for a in allowed_scopes):
         return
 
-    # Tăng bộ đếm và kiểm tra ngưỡng
     c = increment_nudge(context)
     if c >= 4:  # 👉 xuất hiện sau 4 lượt học
         reset_nudge(context)
@@ -1653,7 +1679,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # 🧾 Ghi log
         await log_event(context, "vocab_card", uid, {"word": word})
         await maybe_nudge(update, context, lang)
-        return 
+        return await maybe_nudge(update, context, lang) 
 
 
         # --- GRAMMAR ---
@@ -1760,7 +1786,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             ])
         )
         await log_event(context, "reading_passage", uid, {"topic": topic, "mode": "auto_topic"})
-        return
+        return await maybe_nudge(update, context, lang)
 
 
 
@@ -1896,6 +1922,16 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await log_event(context, "nudge_quiz_start", uid, {"topic": topic, "flavor": flavor})
         return
 
+    if data == "nudge:skip":
+        reset_nudge(context)
+        msg = (
+            "⏭ Okay, we’ll skip the mini-quiz this time."
+            if lang != "ru" else
+            "⏭ Хорошо, пропустим мини-викторину."
+        )
+        await safe_edit_text(q, msg, reply_markup=main_menu(lang))
+        await log_event(context, "nudge_skip", uid, {})
+        return
 
 
 # =========================================================
@@ -2032,6 +2068,7 @@ def main():
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("menu", handle_menu))
     application.add_handler(CommandHandler("help", help_cmd))
+    application.add_handler(CommandHandler("clear", clear_chat))
     application.add_handler(CallbackQueryHandler(on_cb))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     application.add_handler(MessageHandler(filters.PHOTO, handle_image))
