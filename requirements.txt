@@ -7,3 +7,4 @@ APScheduler==3.10.4
 Flask>=3,<4
 pytesseract
 pillow
+requests
