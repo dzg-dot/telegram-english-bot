@@ -176,13 +176,18 @@ async def log_event(context, event, user_id, extra=None):
 # 6) SAFE SENDERS
 # =========================================================
 async def safe_reply_message(message, text: str, reply_markup=None):
+    """Gửi tin nhắn an toàn (fallback khi Telegram từ chối)."""
     try:
-        return await message.reply_text(text, reply_markup=reply_markup)
+        msg = await message.reply_text(text, reply_markup=reply_markup)
+        return msg
     except BadRequest:
         try:
-            return await message.reply_text(trim(text))
+            msg = await message.reply_text(trim(text))
+            return msg
         except Exception as e:
             logger.warning("safe_reply failed: %s", e)
+            return None
+
 
 async def safe_edit_text(query, text: str, reply_markup=None):
     try:
@@ -192,6 +197,35 @@ async def safe_edit_text(query, text: str, reply_markup=None):
             return await query.edit_message_text(trim(text))
         except Exception as e:
             logger.warning("safe_edit_text failed: %s", e)
+
+def mcq_buttons(options):
+        """Tạo nút A/B/C/D cho câu hỏi hiện tại."""
+        return InlineKeyboardMarkup([
+            [InlineKeyboardButton("A", callback_data="ans:A"),
+             InlineKeyboardButton("B", callback_data="ans:B"),
+             InlineKeyboardButton("C", callback_data="ans:C"),
+             InlineKeyboardButton("D", callback_data="ans:D")]
+        ])
+
+
+# =========================================================
+# CLEAR CHAT COMMAND
+async def clear_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Xóa các tin nhắn cũ của bot."""
+    try:
+        chat_id = update.effective_chat.id
+        messages = context.user_data.get("messages_to_delete", [])
+        for mid in messages:
+            try:
+                await context.bot.delete_message(chat_id, mid)
+            except Exception:
+                continue
+        context.user_data["messages_to_delete"] = []
+        await update.message.reply_text("🧹 Chat cleared!")
+    except Exception as e:
+        logger.warning(f"Clear chat failed: {e}")
+        await update.message.reply_text("⚠️ Failed to clear chat.")
+
 # =========================================================
 # PATCH 1: UNIVERSAL BACK TO MENU
 # =========================================================
@@ -862,7 +896,7 @@ async def on_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
             prefs["grade"] = g
             prefs["cefr"] = GRADE_TO_CEFR[g]
             prefs["mode"] = "chat"
-            context.user_data.clear()
+       
             txt = (f"Grade set to {g} (level {prefs['cefr']})."
                    if lang != "ru" else f"Класс {g} (уровень {prefs['cefr']}).")
             await safe_edit_text(q, txt, reply_markup=main_menu(lang))
@@ -1169,17 +1203,72 @@ async def on_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 
+# === NUDGE MINI-QUIZ CALLBACK ===
+    if data == "nudge:start":
+        reset_nudge(context)
 
-    def mcq_buttons(options):
-        """Tạo nút A/B/C/D cho câu hỏi hiện tại."""
-        return InlineKeyboardMarkup([
-            [InlineKeyboardButton("A", callback_data="ans:A"),
-             InlineKeyboardButton("B", callback_data="ans:B"),
-             InlineKeyboardButton("C", callback_data="ans:C"),
-             InlineKeyboardButton("D", callback_data="ans:D")]
-        ])
+        # 📘 Xác định chủ đề và loại bài học gần nhất
+        last_practice = context.user_data.get("practice", {})
+        vocab_bank = context.user_data.get("vocab_bank", [])
+        topic = "general English"
+        flavor = "vocab_syn"  # mặc định nếu không xác định được
 
-    # === ANSWER HANDLING ===
+        if last_practice:
+            # Nếu đang học grammar
+            if "grammar" in last_practice.get("type", ""):
+                topic = last_practice.get("topic", "grammar practice")
+                flavor = random.choice(["grammar_verb", "grammar_error", "grammar_order"])
+            # Nếu đang học reading
+            elif "reading" in last_practice.get("type", ""):
+                topic = last_practice.get("topic", "reading comprehension")
+                flavor = "reading_detail"
+            # Nếu đang học vocab
+            elif "vocab" in last_practice.get("type", "") or vocab_bank:
+                topic = vocab_bank[-1] if vocab_bank else "vocabulary"
+                flavor = random.choice(["vocab_syn", "vocab_cloze", "vocab_ant"])
+
+        await safe_edit_text(q, f"🧠 Starting a quick mini-quiz on {topic}!")
+
+        # 🧩 Sinh 2 câu hỏi mini
+        items = await build_mcq(topic, lang, prefs["cefr"], flavor=flavor)
+        items = items[:2]
+
+        if not items:
+            return await safe_reply_message(
+                update.callback_query.message,
+                "⚠️ Couldn't build the quiz. Try again later.",
+                reply_markup=main_menu(lang)
+            )
+
+        context.user_data["practice"] = {
+            "type": "nudge_quiz",
+            "topic": topic,
+            "items": items,
+            "idx": 0,
+            "score": 0,
+            "ui_lang": lang,
+            "scope": "mini"
+        }
+
+        await send_practice_item(update.callback_query, context)
+        await log_event(context, "nudge_quiz_start", uid, {"topic": topic, "flavor": flavor})
+        return
+
+    if data == "nudge:skip":
+        reset_nudge(context)
+        msg = (
+            "⏭ Okay, we’ll skip the mini-quiz this time."
+            if lang != "ru" else
+            "⏭ Хорошо, пропустим мини-викторину."
+        )
+        await safe_edit_text(q, msg, reply_markup=main_menu(lang))
+        await log_event(context, "nudge_skip", uid, {})
+        return
+
+
+
+
+        # === ANSWER HANDLING ===
     if data.startswith("ans:"):
         st = context.user_data.get("practice")
         if not st:
@@ -1359,24 +1448,6 @@ async def on_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
 
-# =========================================================
-# CLEAR CHAT COMMAND
-async def clear_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Delete recent bot messages (clean interface)."""
-    chat_id = update.effective_chat.id
-    bot = context.bot
-
-    try:
-        async for msg in bot.get_chat_history(chat_id, limit=100):
-            # Chỉ xoá tin nhắn do bot gửi
-            if msg.from_user and msg.from_user.is_bot:
-                try:
-                    await bot.delete_message(chat_id, msg.message_id)
-                except Exception:
-                    pass  # bỏ qua lỗi nếu tin nhắn quá cũ hoặc không xoá được
-        await update.message.reply_text("✅ Chat cleared. Let’s start fresh!")
-    except Exception as e:
-        await update.message.reply_text(f"⚠️ Failed to clear chat: {e}")
 
 # =========================================================
 # 13) TALK COACH & NUDGE SYSTEM
@@ -1512,6 +1583,26 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         lang = detect_lang(text)
 
 
+# ✅ 2. Xác định intent sớm, trước khi xử lý grammar hint
+    t = text.lower()
+    intent = "chat"
+    if re.search(r"\bread\b|\btext\b|\bwrite\b|\btranslate\b|\bgloss\b", t):
+        intent = "reading"
+    elif re.search(r"\bdefine\b|\bmeaning of\b", t):
+        intent = "vocab"
+    elif re.search(r"\bgrammar\b|\btense\b|\bexplain\b|\brule\b", t):
+        intent = "grammar"
+    elif re.search(r"\btalk\b|\bconversation\b|\bspeak\b", t):
+        # Chỉ kích hoạt Talk Mode nếu học sinh đã vào mode talk qua menu
+        if prefs.get("mode") == "talk":
+            intent = "talk"
+        else:
+            intent = "chat"   # vẫn coi là chat bình thường
+    elif re.search(r"\bquiz\b|\bpractice\b|\bexercise\b", t):
+        intent = "practice"
+
+
+
         # --- OUT-OF-SCOPE FILTER (Math, Science, etc.) ---
     out_of_scope = [
         r"\bsolve\b", r"\bcalculate\b", r"\bhow much\b", r"\bformula\b",
@@ -1559,28 +1650,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await log_event(context, "grammar_hint", update.effective_user.id, {"hint": hint})
                 break
 
-# ✅ 2. Xác định intent sớm, trước khi xử lý grammar hint
-    t = text.lower()
-    intent = "chat"
-    if re.search(r"\bread\b|\btext\b|\bwrite\b|\btranslate\b|\bgloss\b", t):
-        intent = "reading"
-    elif re.search(r"\bdefine\b|\bmeaning of\b", t):
-        intent = "vocab"
-    elif re.search(r"\bgrammar\b|\btense\b|\bexplain\b|\brule\b", t):
-        intent = "grammar"
-    elif re.search(r"\btalk\b|\bconversation\b|\bspeak\b", t):
-        # Chỉ kích hoạt Talk Mode nếu học sinh đã vào mode talk qua menu
-        if prefs.get("mode") == "talk":
-            intent = "talk"
-        else:
-            intent = "chat"   # vẫn coi là chat bình thường
-    elif re.search(r"\bquiz\b|\bpractice\b|\bexercise\b", t):
-        intent = "practice"
-
 	
 
        # --- TALK CONTEXT CONTINUE ---
-    if prefs.get("mode") == "talk" or "talk" in context.user_data:
+    if prefs.get("mode") == "talk" or ("talk" in context.user_data):
         talk_state = context.user_data.get("talk", {"topic": "general", "turns": 0})
         topic = talk_state.get("topic", "daily life")
         user_text = (update.message.text or "").strip()
@@ -1899,68 +1972,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await maybe_nudge(update, context, lang)
         return
 
-
-# === NUDGE MINI-QUIZ CALLBACK ===
-    if data == "nudge:start":
-        reset_nudge(context)
-
-        # 📘 Xác định chủ đề và loại bài học gần nhất
-        last_practice = context.user_data.get("practice", {})
-        vocab_bank = context.user_data.get("vocab_bank", [])
-        topic = "general English"
-        flavor = "vocab_syn"  # mặc định nếu không xác định được
-
-        if last_practice:
-            # Nếu đang học grammar
-            if "grammar" in last_practice.get("type", ""):
-                topic = last_practice.get("topic", "grammar practice")
-                flavor = random.choice(["grammar_verb", "grammar_error", "grammar_order"])
-            # Nếu đang học reading
-            elif "reading" in last_practice.get("type", ""):
-                topic = last_practice.get("topic", "reading comprehension")
-                flavor = "reading_detail"
-            # Nếu đang học vocab
-            elif "vocab" in last_practice.get("type", "") or vocab_bank:
-                topic = vocab_bank[-1] if vocab_bank else "vocabulary"
-                flavor = random.choice(["vocab_syn", "vocab_cloze", "vocab_ant"])
-
-        await safe_edit_text(q, f"🧠 Starting a quick mini-quiz on {topic}!")
-
-        # 🧩 Sinh 2 câu hỏi mini
-        items = await build_mcq(topic, lang, prefs["cefr"], flavor=flavor)
-        items = items[:2]
-
-        if not items:
-            return await safe_reply_message(
-                update.callback_query.message,
-                "⚠️ Couldn't build the quiz. Try again later.",
-                reply_markup=main_menu(lang)
-            )
-
-        context.user_data["practice"] = {
-            "type": "nudge_quiz",
-            "topic": topic,
-            "items": items,
-            "idx": 0,
-            "score": 0,
-            "ui_lang": lang,
-            "scope": "mini"
-        }
-
-        await send_practice_item(update.callback_query, context)
-        await log_event(context, "nudge_quiz_start", uid, {"topic": topic, "flavor": flavor})
-        return
-
-    if data == "nudge:skip":
-        reset_nudge(context)
-        msg = (
-            "⏭ Okay, we’ll skip the mini-quiz this time."
-            if lang != "ru" else
-            "⏭ Хорошо, пропустим мини-викторину."
-        )
-        await safe_edit_text(q, msg, reply_markup=main_menu(lang))
-        await log_event(context, "nudge_skip", uid, {})
-        return
 
 
 # =========================================================
