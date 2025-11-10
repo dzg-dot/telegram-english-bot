@@ -841,6 +841,8 @@ async def build_mcq(topic_or_text: str, ui_lang: str, level: str, flavor: str = 
         })
 
     return valid
+
+
 # =========================================================
 
 async def send_practice_item(update_or_query, context: ContextTypes.DEFAULT_TYPE):
@@ -1288,8 +1290,10 @@ async def on_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         # 🧩 Sinh 3 câu hỏi nhỏ về từ vừa tra
         flavors = ["vocab_synonyms", "vocab_antonyms", "vocab_context"]
-        items = await build_mcq(word, lang, prefs["cefr"], flavor=flavor)
-        items = items[:3] 
+        all_items = []
+            for f in flavors:
+                sub = await build_mcq(word, lang, prefs["cefr"], flavor=f)
+                all_items.extend(sub[:1])   # chỉ lấy 1 câu mỗi loại 
 
         # 🔍 Lọc trùng câu hỏi nếu có
         seen = set()
