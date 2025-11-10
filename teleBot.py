@@ -3,8 +3,8 @@
 # =========================================================
 # 0) IMPORTS & GLOBAL SETUP
 # =========================================================
-import os, re, json, time, hmac, hashlib, logging, asyncio, uuid, difflib
-from datetime import datetime, timezone, random
+import os, re, json, time, hmac, hashlib, logging, asyncio, uuid, difflib, random
+from datetime import datetime, timezone
 
 import httpx
 from dotenv import load_dotenv
