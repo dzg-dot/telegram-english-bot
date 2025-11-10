@@ -1291,9 +1291,9 @@ async def on_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # 🧩 Sinh 3 câu hỏi nhỏ về từ vừa tra
         flavors = ["vocab_synonyms", "vocab_antonyms", "vocab_context"]
         all_items = []
-            for f in flavors:
-                sub = await build_mcq(word, lang, prefs["cefr"], flavor=f)
-                all_items.extend(sub[:1])   # chỉ lấy 1 câu mỗi loại 
+        for f in flavors:
+            sub = await build_mcq(word, lang, prefs["cefr"], flavor=f)
+            all_items.extend(sub[:1])   # chỉ lấy 1 câu mỗi loại 
 
         # 🔍 Lọc trùng câu hỏi nếu có
         seen = set()
