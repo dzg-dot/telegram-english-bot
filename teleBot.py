@@ -4,7 +4,7 @@
 # 0) IMPORTS & GLOBAL SETUP
 # =========================================================
 import os, re, json, time, hmac, hashlib, logging, asyncio, uuid, difflib
-from datetime import datetime, timezone
+from datetime import datetime, timezone, random
 
 import httpx
 from dotenv import load_dotenv
