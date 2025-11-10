@@ -587,6 +587,15 @@ async def build_reading_passage(topic, prefs):
         return ""
 
 
+ # =========================
+async def build_mcq(topic_or_text: str, ui_lang: str, level: str, flavor: str = "generic"):
+    """
+    Create a 5-question MCQ set based on grade, topic, and exercise flavor.
+    Supports: vocab_*, grammar_*, reading_*.
+    """
+    # =========================
+    # 1️⃣ Define task map
+    # =========================
     task_map = {
         # =====================
         # --- VOCABULARY TYPES ---
