@@ -1038,16 +1038,25 @@ async def on_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
         try:
             # --- Tách riêng Reading mode ---
             if group == "reading":
-                # 📝 Tạo một đoạn reading passage mới mỗi lần
-                topic = random.choice(["daily life", "friendship", "school", "animals", "family", "hobbies"])
+                # 📝 Random topic + sinh đoạn passage
+                topic = random.choice(["daily life", "friendship", "school life", "animals", "family", "hobbies", "technology"])
                 passage = await build_reading_passage(topic, prefs)
 
-                # Sinh câu hỏi dựa trên đoạn văn vừa tạo
-                items = await build_mcq(passage, lang, level, flavor=flavor_key)
+                # ⚙️ Nếu passage trống hoặc lỗi → thử lại 1 lần
+                if not passage or len(passage.strip()) < 40:
+                    passage = await build_reading_passage("general topic", prefs)
 
-                # Lưu lại passage và topic để gloss / review sau
+                # 🔐 Lưu passage để gloss / lại dùng sau
                 context.user_data["last_passage"] = passage
                 context.user_data["reading_topic"] = topic
+
+                # 🧠 Gọi model tạo câu hỏi
+                items = await build_mcq(passage, lang, level, flavor=flavor_key)
+
+                # ⚙️ Nếu vẫn không có câu hỏi → thử fallback generic
+                if not items:
+                    logger.warning(f"Reading MCQ failed for {flavor_key}, retrying generic")
+                    items = await build_mcq(passage, lang, level, flavor="reading_details")
 
             else:
                 # --- Grammar & Vocab dùng nội dung gần nhất hoặc general ---
@@ -1064,6 +1073,7 @@ async def on_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         # --- Không tạo được câu hỏi ---
         if not items:
+            logger.warning(f"build_mcq returned empty for flavor_key={flavor_key}, passage_len={len(passage) if 'passage' in locals() else 0}")
             return await safe_edit_text(
                 q,
                 "⚠️ No questions generated.",
