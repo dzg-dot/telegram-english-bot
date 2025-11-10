@@ -800,14 +800,16 @@ async def practice_summary(update: Update, context: ContextTypes.DEFAULT_TYPE):
     lines.append(reward_text)
 
     # --- Determine “continue” action ---
-    if scope == "vocab":
-        again_callback = "vocab:practice"
+    # --- Determine “continue” action ---
+    if scope in ("vocab", "vocab_direct"):
+        again_callback = "vocab:quiz"
     elif scope == "grammar":
-        again_callback = "grammar:practice"
+        again_callback = "grammar:quiz"
     elif scope == "reading":
-        again_callback = "reading:practice"
+        again_callback = "reading:quiz"
     else:
         again_callback = "footer:again"
+
 
         # --- Build footer keyboard (simplified & smart back) ---
     again_callback = "footer:again"
@@ -866,12 +868,29 @@ async def on_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # === MENU ROOT ===
     if data == "menu:root":
         prefs["mode"] = "chat"
-        context.user_data.clear()     # 🧹 Xóa mọi state cũ (practice, talk, vocab_bank,…)
+        layer = context.user_data.get("menu_layer", "")
         reset_nudge(context)
-        msg = "📋 Back to main menu." if lang != "ru" else "Возврат в меню."
+
+        # Nếu đang ở exercise (practice mode) → quay về menu practice
+        if layer == "exercise":
+            txt = "📘 Back to practice menu." if lang != "ru" else "📘 Возврат в меню практики."
+            kb = InlineKeyboardMarkup([
+                [InlineKeyboardButton("🧠 Vocabulary", callback_data="practice:vocab_menu")],
+                [InlineKeyboardButton("⚙️ Grammar", callback_data="practice:grammar_menu")],
+                [InlineKeyboardButton("📖 Reading", callback_data="practice:reading_menu")],
+                [InlineKeyboardButton("🏠 Main menu", callback_data="menu:root_force")]
+            ])
+            await safe_edit_text(q, txt, reply_markup=kb)
+            await log_event(context, "menu_back_to_practice", uid, {"lang": lang})
+            return
+
+        # Còn nếu đang ở quiz hoặc ở bất kỳ layer nào khác → về main menu
+        context.user_data.clear()
+        msg = "📋 Back to main menu." if lang != "ru" else "📋 Возврат в главное меню."
         await safe_edit_text(q, msg, reply_markup=main_menu(lang))
         await log_event(context, "menu_root", uid, {})
         return
+
 
     # === LANGUAGE SELECT ===
     if data == "menu:lang":
@@ -1010,17 +1029,31 @@ async def on_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         await safe_edit_text(
             q,
-            f"📝 Generating {group.capitalize()} - {flavor.capitalize()} practice... Please wait."
+            f"🧩 Generating {group.capitalize()} - {flavor.capitalize()} practice... Please wait."
         )
-
-        # 🧩 Lấy topic hoặc đoạn text gần nhất (nếu có)
-        topic_or_text = context.user_data.get("last_passage", "general English")
 
         # 🧠 Map nhóm + flavor thành flavor_key chuẩn cho build_mcq
         flavor_key = f"{group}_{flavor}"
 
         try:
-            items = await build_mcq(topic_or_text, lang, level, flavor=flavor_key)
+            # --- Tách riêng Reading mode ---
+            if group == "reading":
+                # 📝 Tạo một đoạn reading passage mới mỗi lần
+                topic = random.choice(["daily life", "friendship", "school", "animals", "family", "hobbies"])
+                passage = await build_reading_passage(topic, prefs)
+
+                # Sinh câu hỏi dựa trên đoạn văn vừa tạo
+                items = await build_mcq(passage, lang, level, flavor=flavor_key)
+
+                # Lưu lại passage và topic để gloss / review sau
+                context.user_data["last_passage"] = passage
+                context.user_data["reading_topic"] = topic
+
+            else:
+                # --- Grammar & Vocab dùng nội dung gần nhất hoặc general ---
+                topic_or_text = context.user_data.get("last_passage", "general English")
+                items = await build_mcq(topic_or_text, lang, level, flavor=flavor_key)
+
         except Exception as e:
             logger.warning(f"build_mcq error ({flavor_key}): {e}")
             return await safe_edit_text(
@@ -1029,6 +1062,7 @@ async def on_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 reply_markup=main_menu(lang)
             )
 
+        # --- Không tạo được câu hỏi ---
         if not items:
             return await safe_edit_text(
                 q,
@@ -1073,9 +1107,9 @@ async def on_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 
-    # === VOCAB PRACTICE ===
-       # === VOCABULARY QUICK QUIZ (Practice this word) ===
-    if data == "vocab:practice":
+
+          # === VOCABULARY QUICK QUIZ (Practice this word) ===
+    if data == "vocab:quiz":
         word = context.user_data.get("last_word", "").strip()
         if not word:
             return await safe_edit_text(
@@ -1124,11 +1158,11 @@ async def on_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
         }
 
         # 📍 Đánh dấu đang ở layer bài tập độc lập
-        context.user_data["menu_layer"] = "exercise"
+        context.user_data["menu_layer"] = "quiz"
 
         # 🚀 Gửi câu hỏi đầu tiên
         await send_practice_item(q, context)
-        await log_event(context, "vocab_practice", uid, {"word": word})
+        await log_event(context, "vocab_quiz", uid, {"word": word})
         return
 
         # === VOCAB MORE EXAMPLES (B1+ level) ===
@@ -1158,7 +1192,7 @@ async def on_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         out = await ask_openai(msgs, max_tokens=180)
         kb = InlineKeyboardMarkup([
-            [InlineKeyboardButton("✏️ Practice this word", callback_data="vocab:practice"),
+            [InlineKeyboardButton("✏️ Practice this word", callback_data="vocab:quiz"),
              InlineKeyboardButton("🏠 Menu", callback_data="menu:root")]
         ])
 
@@ -1168,7 +1202,7 @@ async def on_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
         # === GRAMMAR PRACTICE (with retry & summary footer) ===
-    if data == "grammar:practice":
+    if data == "grammar:quiz":
         topic = context.user_data.get("last_grammar_topic", "Present Simple")
         if not topic:
             return await safe_edit_text(q, "No grammar topic found.", reply_markup=main_menu(lang))
@@ -1205,7 +1239,7 @@ async def on_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "scope": "grammar",
             "retry": False
         }
-        context.user_data["menu_layer"] = "exercise"
+        context.user_data["menu_layer"] = "quiz"
 
         # 🔹 Gửi câu hỏi đầu tiên
         await send_practice_item(q, context)
@@ -1224,7 +1258,7 @@ async def on_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 {"role": "user", "content": prompt}]
         out = await ask_openai(msgs, max_tokens=300)
         kb = InlineKeyboardMarkup([
-            [InlineKeyboardButton("✏️ Practice this rule", callback_data="grammar:practice")],
+            [InlineKeyboardButton("✏️ Practice this rule", callback_data="grammar:quiz")],
             [InlineKeyboardButton("🏠 Menu", callback_data="menu:root")]
         ])
         await safe_edit_text(q, trim(out), reply_markup=kb)
@@ -1261,7 +1295,7 @@ async def on_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await safe_reply_message(update.callback_query.message, trim(header + chunk))
 
         kb = InlineKeyboardMarkup([
-            [InlineKeyboardButton("📝 Practice this text", callback_data="reading:practice")],
+            [InlineKeyboardButton("📝 Practice this text", callback_data="reading:quiz")],
             [InlineKeyboardButton("🏠 Back to menu", callback_data="menu:root")]
         ])
         await safe_reply_message(update.callback_query.message, "—", reply_markup=kb)
@@ -1282,7 +1316,7 @@ async def on_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
     # === READING PRACTICE ===
-    if data == "reading:practice":
+    if data == "reading:quiz":
         passage = (context.user_data.get("last_passage") or "").strip()
         topic = context.user_data.get("reading_topic", "reading")
 
@@ -1308,7 +1342,7 @@ async def on_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "type": "reading", "topic": topic, "items": items,
             "idx": 0, "score": 0, "ui_lang": lang, "scope": "reading"
         }
-        context.user_data["menu_layer"] = "exercise"
+        context.user_data["menu_layer"] = "quiz"
 
         await send_practice_item(update.callback_query, context)
         await log_event(context, "reading_practice_start", uid, {"topic": topic, "count": len(items)})
@@ -1886,7 +1920,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         # 📘 Gửi kết quả + nút tương tác
         kb = InlineKeyboardMarkup([
-            [InlineKeyboardButton("✏️ Practice this word", callback_data="vocab:practice"),
+            [InlineKeyboardButton("✏️ Practice this word", callback_data="vocab:quiz"),
              InlineKeyboardButton("➕ More examples", callback_data="vocab:more")],
             [InlineKeyboardButton("🏠 Menu", callback_data="menu:root")]
         ])
@@ -1912,7 +1946,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         # ✅ Gửi phản hồi + nút tương tác
         kb = InlineKeyboardMarkup([
-            [InlineKeyboardButton("✏️ Practice this rule", callback_data="grammar:practice"),
+            [InlineKeyboardButton("✏️ Practice this rule", callback_data="grammar:quiz"),
              InlineKeyboardButton("📚 Explain more", callback_data="footer:explain_more")],
             [InlineKeyboardButton("🏠 Menu", callback_data="menu:root")]
         ])
@@ -1968,7 +2002,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await safe_reply_message(update.message, trim(header + chunk))
 
             kb = InlineKeyboardMarkup([
-                [InlineKeyboardButton("📝 Practice this text", callback_data="reading:practice")],
+                [InlineKeyboardButton("📝 Practice this text", callback_data="reading:quiz")],
                 [InlineKeyboardButton("🏠 Back to menu", callback_data="menu:root")]
             ])
             await safe_reply_message(update.message, "—", reply_markup=kb)
@@ -1998,7 +2032,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             trim(passage),
             reply_markup=InlineKeyboardMarkup([
                 [InlineKeyboardButton("📘 Gloss this text", callback_data="reading:gloss"),
-                 InlineKeyboardButton("📝 Practice this text", callback_data="reading:practice")],
+                 InlineKeyboardButton("📝 Practice this text", callback_data="reading:quiz")],
                 [InlineKeyboardButton("🏠 Menu", callback_data="menu:root")]
             ])
         )
