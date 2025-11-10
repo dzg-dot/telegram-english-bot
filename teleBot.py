@@ -1689,7 +1689,7 @@ async def on_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "Try: 'My family is ...', 'We often ... together.'",
             "You can say: 'In the future, I want to ...', 'I hope to visit ... someday.'"
         ]
-        import random
+       
         tip = random.choice(talk_tips)
 
         kb = InlineKeyboardMarkup([
