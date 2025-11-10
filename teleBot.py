@@ -548,102 +548,221 @@ def fuzzy_equal(a: str, b: str, threshold: float = 0.85) -> bool:
     return difflib.SequenceMatcher(a=normalize_answer(a), b=normalize_answer(b)).ratio() >= threshold
 
 
-async def build_mcq(topic_or_text: str, ui_lang: str, level: str, flavor: str = "generic"):
+async def build_reading_passage(topic, prefs):
     """
-    Create a 5-question MCQ set based on grade, topic, and exercise flavor.
-    Supports: vocab_*, grammar_*, reading_*.
+    Generate a short reading passage (A2–B1) based on topic.
+    Used in Reading Practice to create context for comprehension questions.
     """
-    # =========================
-    # 1️⃣ Define task map
-    # =========================
+    lang = prefs.get("lang", "en")
+    level = prefs.get("cefr", "A2")
+
+    # 🧠 Prompt hướng dẫn model tạo đoạn text
+    msgs = [
+        {"role": "system", "content": (
+            "You are an English teacher for middle school students (CEFR A2–B1). "
+            "Write short, interesting reading passages about everyday topics."
+        )},
+        {"role": "user", "content": (
+            f"Write a {level} level English reading passage of about 100–120 words. "
+            f"Topic: {topic}. "
+            "Use clear sentences, familiar vocabulary, and one main idea. "
+            "Do not include questions or bullet points."
+        )}
+    ]
+
+    try:
+        raw = await ask_openai(msgs, max_tokens=350)
+        passage = raw.strip()
+        if len(passage) < 60:
+            # fallback nếu đoạn quá ngắn
+            msgs[1]["content"] = (
+                f"Write a simple short story about {topic} (A2–B1, 100 words). "
+                "Include details students can answer questions about later."
+            )
+            raw = await ask_openai(msgs, max_tokens=350)
+            passage = raw.strip()
+        return passage
+    except Exception as e:
+        logger.warning(f"build_reading_passage error for topic={topic}: {e}")
+        return ""
+
+
     task_map = {
+        # =====================
         # --- VOCABULARY TYPES ---
+        # =====================
+
         "vocab_synonyms": (
-            "Write 5 multiple-choice questions testing SYNONYMS for the given word or phrase. "
-            "Each question should have:\n"
-            "• A short instruction like 'Choose the synonym for ...'.\n"
-            "• 4 options (A–D), one correct synonym.\n"
-            "• A brief explanation (≤20 words) why it’s correct."
+            "Write 5 multiple-choice questions (A–D) testing SYNONYMS (similar meaning words). "
+            "Each question should:\n"
+            "• Ask: 'Which word is closest in meaning to ...?'\n"
+            "• Include a short example sentence if needed.\n"
+            "• Provide 4 clear options (A–D), one correct synonym and three distractors.\n"
+            "• Keep vocabulary at CEFR A2–B1 level.\n"
+            "• Add a short explanation (≤20 words)."
         ),
+
         "vocab_antonyms": (
-            "Write 5 MCQs testing ANTONYMS of the given word or phrase. "
-            "Include short sentences where helpful. Each question: 4 options (A–D), one correct opposite meaning."
+            "Write 5 multiple-choice questions (A–D) testing ANTONYMS (opposite meaning words). "
+            "Each question should:\n"
+            "• Ask: 'Which word has the opposite meaning to ...?'\n"
+            "• Include a short example sentence when possible.\n"
+            "• Provide 4 short options (A–D), one correct antonym and three distractors.\n"
+            "• Keep vocabulary suitable for CEFR A2–B1 students.\n"
+            "• Include a 1-sentence explanation."
         ),
+
         "vocab_context": (
-            "Write 5 MCQs asking students to choose the best word IN CONTEXT. "
-            "Each question shows one short sentence with a blank '____'. "
-            "Provide 4 options, 1 correct, 3 distractors. Add short explanations."
+            "Write 5 MCQs asking students to choose the correct word IN CONTEXT. "
+            "Each question should:\n"
+            "• Include a short sentence with a blank '____'.\n"
+            "• Provide 4 possible words (A–D), one that fits grammatically and logically.\n"
+            "• Avoid using overly advanced or idiomatic phrases.\n"
+            "• Add a short explanation of why the correct word fits best."
         ),
+
         "vocab_formation": (
             "Write 5 MCQs testing WORD FORMATION (noun, verb, adjective, adverb forms). "
-            "Each question should include a sentence with a blank, e.g. 'She was very ____ (beauty)'."
+            "Each question should:\n"
+            "• Include a sentence with a blank and a base word in parentheses, e.g. 'She was very ____ (beauty)'.\n"
+            "• Ask which form fits grammatically.\n"
+            "• Provide 4 choices (A–D) with different word forms.\n"
+            "• Include short explanation (≤20 words)."
         ),
+
         "vocab_collocations": (
-            "Write 5 MCQs testing common COLLOCATIONS with the given word. "
-            "Each question gives a phrase with a missing word (e.g., 'make ___', 'heavy ___'). "
-            "4 options (1 correct), short explanations."
+            "Write 5 MCQs testing COLLOCATIONS (natural word combinations). "
+            "Each question should:\n"
+            "• Contain a sentence with a missing word, e.g. 'He made a ____ mistake.'\n"
+            "• Provide 4 possible collocations (A–D), one correct and three wrong.\n"
+            "• Keep words common for A2–B1 learners.\n"
+            "• Add a short explanation."
         ),
+
         "vocab_phrasal": (
-            "Write 5 MCQs testing PHRASAL VERBS with the given base verb. "
-            "Each question uses a natural short sentence and 4 options (e.g. 'give up', 'take off'). "
-            "Include correct answer and a 1-sentence explanation."
+            "Write 5 MCQs testing PHRASAL VERBS. "
+            "Each question should:\n"
+            "• Use a short natural sentence with a blank.\n"
+            "• Provide 4 phrasal verbs (A–D) formed from the same base verb (e.g. take off, take up, take in, take over).\n"
+            "• Include one correct and three distractors.\n"
+            "• Add a short explanation (≤20 words)."
         ),
 
+
+        # =====================
         # --- GRAMMAR TYPES ---
+        # =====================
+
         "grammar_verbs": (
-            "Write 5 MCQs where students choose the correct VERB FORM (tense, agreement, or aspect). "
-            "Each question has 4 options and a short explanation. Level: {level}."
+            "Write 5 multiple-choice questions (A–D) testing correct verb forms. "
+            "Each question should:\n"
+            "• Have one blank space for the verb.\n"
+            "• Provide 4 verb forms (A–D) covering tenses and aspects (present, past, perfect, continuous).\n"
+            "• Ensure natural grammar for CEFR A2–B1.\n"
+            "• Add a short explanation (≤20 words)."
         ),
+
         "grammar_errors": (
-            "Write 5 MCQs for ERROR CORRECTION. Each shows one incorrect sentence. "
-            "Provide 4 corrected versions (A–D). Explain briefly why the correct form is right."
+            "Write 5 MCQs testing grammar error correction. "
+            "Each question should:\n"
+            "• Show one incorrect sentence.\n"
+            "• Ask: 'Which is the correct sentence?'\n"
+            "• Provide 4 corrected options (A–D).\n"
+            "• Use grammar points such as subject-verb agreement, articles, or prepositions.\n"
+            "• Include a brief explanation of the correction."
         ),
+
         "grammar_order": (
-            "Write 5 MCQs testing WORD ORDER. "
-            "Each question gives 4 jumbled options (A–D), one grammatically correct."
+            "Write 5 MCQs that test correct English word order. "
+            "Each question should:\n"
+            "• Present a jumbled sentence (e.g. 'every / plays / Saturday / she / soccer').\n"
+            "• Ask: 'Choose the correct order.'\n"
+            "• Provide 4 possible orders (A–D), only one correct.\n"
+            "• Keep sentences short and clear for A2–B1.\n"
+            "• Add a brief explanation."
         ),
+
         "grammar_conditionals": (
-            "Write 5 MCQs about CONDITIONALS (0, 1st, 2nd, 3rd). "
-            "Include mixed examples with 4 options. Add 1-sentence explanation."
+            "Write 5 MCQs testing CONDITIONAL SENTENCES (Type 0–3). "
+            "Each question should:\n"
+            "• Include one conditional sentence with a blank.\n"
+            "• Provide 4 choices (A–D) — one correct form of the verb or clause.\n"
+            "• Include a short explanation of the grammar rule."
         ),
+
         "grammar_modals": (
-            "Write 5 MCQs about MODAL VERBS (can, must, should, might, etc.). "
-            "Ask for correct usage or meaning. Provide 4 options, short explanation."
+            "Write 5 MCQs testing MODAL VERBS (can, must, should, may, might, etc.). "
+            "Each question should:\n"
+            "• Ask about correct meaning or usage in context.\n"
+            "• Provide 4 options (A–D), one correct.\n"
+            "• Include short explanation (≤20 words)."
         ),
+
         "grammar_mixed": (
-            "Write 5 mixed GRAMMAR MCQs combining tenses, modals, and prepositions. "
-            "Level: {level}. Each question has 4 clear options."
+            "Write 5 mixed grammar MCQs combining different grammar areas (tenses, prepositions, articles, modals). "
+            "Each question should:\n"
+            "• Be one clear sentence with a blank.\n"
+            "• Provide 4 options (A–D), one correct.\n"
+            "• Add a short explanation of the grammar point."
         ),
 
+
+        # =====================
         # --- READING TYPES ---
+        # =====================
+
         "reading_mainidea": (
-            "Write 5 READING COMPREHENSION questions about the MAIN IDEA of the passage. "
-            "Avoid details; focus on topic and purpose."
-        ),
-        "reading_details": (
-            "Write 5 MCQs about SPECIFIC DETAILS or facts from the passage. "
-            "Each question should have 4 options and 1-sentence explanation."
-        ),
-        "reading_inference": (
-            "Write 5 MCQs testing INFERENCE — what can be understood but not directly stated. "
-            "Each question has 4 choices and a short explanation."
-        ),
-        "reading_vocabcontext": (
-            "Write 5 MCQs about VOCABULARY IN CONTEXT. "
-            "Each question quotes a short sentence and asks the meaning of one word or phrase."
-        ),
-        "reading_cloze": (
-            "Write 5 CLOZE TEST questions (fill in missing word in passage). "
-            "Each blank should have 4 possible options (A–D)."
+            "Write 5 READING COMPREHENSION questions testing MAIN IDEA. "
+            "Each question should:\n"
+            "• Focus on the general meaning, topic, or purpose of the passage.\n"
+            "• Avoid factual or detail-based questions.\n"
+            "• Provide 4 options (A–D) and a short explanation."
         ),
 
+        "reading_details": (
+            "Write 5 READING COMPREHENSION questions testing DETAILS or FACTS. "
+            "Each question should:\n"
+            "• Ask about specific information mentioned in the passage.\n"
+            "• Avoid trivial numbers or dates.\n"
+            "• Provide 4 options (A–D), one correct, with a short explanation."
+        ),
+
+        "reading_inference": (
+            "Write 5 READING COMPREHENSION questions testing INFERENCE. "
+            "Each question should:\n"
+            "• Require students to understand meaning that is not directly stated.\n"
+            "• Provide 4 options (A–D) with one logical answer.\n"
+            "• Include a short explanation."
+        ),
+
+        "reading_vocabcontext": (
+            "Write 5 READING COMPREHENSION questions testing VOCABULARY IN CONTEXT. "
+            "Each question should:\n"
+            "• Quote a short sentence from the passage.\n"
+            "• Ask: 'What does the word ___ mean here?'\n"
+            "• Provide 4 meanings (A–D), one correct.\n"
+            "• Include a short explanation."
+        ),
+
+        "reading_cloze": (
+            "Write 5 CLOZE TEST questions (fill in the blanks) based on the passage. "
+            "Each question should:\n"
+            "• Omit one key word.\n"
+            "• Provide 4 possible options (A–D).\n"
+            "• Indicate one correct answer."
+        ),
+
+
+        # =====================
         # --- FALLBACK / GENERIC ---
+        # =====================
+
         "generic": (
             "Write 5 general English MCQs (A2–B1+). "
-            "Mix grammar, vocabulary, and reading comprehension. 4 options per question."
+            "Mix grammar, vocabulary, and comprehension. "
+            "Each question should have 4 options and one correct answer with a short explanation."
         ),
     }
-
     # =========================
     # 2️⃣ Select task prompt
     # =========================
@@ -652,7 +771,7 @@ async def build_mcq(topic_or_text: str, ui_lang: str, level: str, flavor: str = 
     # Difficulty tag
     if level in ("A2", "A2+"):
         diff_note = "Use simple sentences and everyday words."
-    elif level == "B1":
+    elif level == "B1+":
         diff_note = "Include 1–2 slightly more advanced structures or idioms."
     else:
         diff_note = "Keep within A2–B1 school-level range."
@@ -660,8 +779,10 @@ async def build_mcq(topic_or_text: str, ui_lang: str, level: str, flavor: str = 
     # =========================
     # 3️⃣ Construct model prompt
     # =========================
+    prefix = f"[Type: English MCQ | Focus: {flavor} | CEFR: {level}]\n"
+
     prompt = (
-        f"{task}\n\n"
+        f"{prefix}{task}\n\n"
         "Return STRICT JSON only in this format:\n"
         "{ \"questions\": ["
         "{\"id\":1,\"question\":\"...\",\"options\":[\"...\",\"...\",\"...\",\"...\"],"
@@ -672,8 +793,12 @@ async def build_mcq(topic_or_text: str, ui_lang: str, level: str, flavor: str = 
         f"Language for question and options: {'Russian' if ui_lang=='ru' else 'English'}."
     )
 
-    msgs = [{"role": "system", "content": POLICY_STUDY},
-            {"role": "user", "content": prompt}]
+    msgs = [
+        {"role": "system", "content": POLICY_STUDY},
+        {"role": "user", "content": prompt}
+    ]
+
+    logger.info(f"🧠 Generating MCQs | Type={flavor} | Level={level} | Lang={ui_lang}")
 
     # =========================
     # 4️⃣ Request from model
@@ -698,7 +823,7 @@ async def build_mcq(topic_or_text: str, ui_lang: str, level: str, flavor: str = 
         if ans not in ("A", "B", "C", "D"):
             ans = "A"
         valid.append({
-            "id": q.get("id", len(valid)+1),
+            "id": q.get("id", len(valid) + 1),
             "question": q.get("question", ""),
             "options": opts,
             "answer": ans,
@@ -707,8 +832,6 @@ async def build_mcq(topic_or_text: str, ui_lang: str, level: str, flavor: str = 
         })
 
     return valid
-
-
 # =========================================================
 async def send_practice_item(update_or_query, context: ContextTypes.DEFAULT_TYPE):
     """Gửi 1 câu hỏi trắc nghiệm (MCQ) có 4 lựa chọn A–D, hiển thị gọn và an toàn."""
