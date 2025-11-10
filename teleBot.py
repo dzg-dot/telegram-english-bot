@@ -830,7 +830,7 @@ async def build_mcq(topic_or_text: str, ui_lang: str, level: str, flavor: str = 
             continue
         ans = str(q.get("answer", "A")).strip().upper()
         if ans not in ("A", "B", "C", "D"):
-            ans = "A"
+            ans = random.choice([ "A", "B", "C", "D"])
         valid.append({
             "id": q.get("id", len(valid) + 1),
             "question": q.get("question", ""),
@@ -842,6 +842,7 @@ async def build_mcq(topic_or_text: str, ui_lang: str, level: str, flavor: str = 
 
     return valid
 # =========================================================
+
 async def send_practice_item(update_or_query, context: ContextTypes.DEFAULT_TYPE):
     """Gửi 1 câu hỏi trắc nghiệm (MCQ) có 4 lựa chọn A–D, hiển thị gọn và an toàn."""
     st = context.user_data.get("practice")
@@ -851,10 +852,21 @@ async def send_practice_item(update_or_query, context: ContextTypes.DEFAULT_TYPE
     idx = st["idx"]
     q = st["items"][idx]
     total = len(st["items"])
+    scope = st.get("scope", "")
+    lang = st.get("ui_lang", "en")
+
+    # --- Nếu là bài Reading, hiển thị lại đoạn passage trước câu hỏi ---
+    passage_text = ""
+    if scope == "reading":
+        passage = context.user_data.get("last_passage", "")
+        if passage:
+            passage_preview = trim(passage[:800])
+            passage_text = f"📖 Passage:\n{passage_preview}\n\n"
 
     # --- Build question text safely ---
     question = q.get("question", "").strip()
     options = q.get("options", [])
+
     if not options:
         msg_target = (
             update_or_query.message
@@ -863,20 +875,31 @@ async def send_practice_item(update_or_query, context: ContextTypes.DEFAULT_TYPE
         )
         return await safe_reply_message(msg_target, "⚠️ This question has no options.")
 
-    # --- Format hiển thị ---
-    header = f"📘 Q{idx+1}/{total}\n\n"
-    wrapped_q = (question[:3800] + "..." if len(question) > 3800 else question)
+    # --- Shuffle options (random vị trí đáp án đúng) ---
+    correct_answer = q.get("answer", "A").strip().upper()
+    letters = ["A", "B", "C", "D"]
+    if len(options) == 4:
+        # xác định đáp án đúng trước khi xáo
+        correct_index = letters.index(correct_answer) if correct_answer in letters else 0
+        correct_text = options[correct_index] if correct_index < len(options) else options[0]
+        random.shuffle(options)
+        correct_answer = letters[options.index(correct_text)]
+        q["options"] = options
+        q["answer"] = correct_answer
+
+    # --- Gắn header câu hỏi ---
+    header = f"{passage_text}📘 Q{idx + 1}/{total}\n\n"
+    wrapped_q = question[:3800] + "..." if len(question) > 3800 else question
     txt = header + wrapped_q + "\n\n"
 
-   # --- Thêm các lựa chọn ---
-    letters = ["A", "B", "C", "D"]
+    # --- Thêm các lựa chọn (đã shuffle) ---
     for i, opt in enumerate(options):
         clean_opt = opt.strip().replace("\n", " ")
         if len(clean_opt) > 300:
             clean_opt = clean_opt[:300] + "..."
         txt += f"{letters[i]}) {clean_opt}\n"
 
-    # --- Nút chọn đáp án (2 hàng) ---
+    # --- Nút chọn đáp án (2 hàng, gọn gàng) ---
     kb = InlineKeyboardMarkup([
         [InlineKeyboardButton("A", callback_data="ans:A"),
          InlineKeyboardButton("B", callback_data="ans:B")],
@@ -884,11 +907,13 @@ async def send_practice_item(update_or_query, context: ContextTypes.DEFAULT_TYPE
          InlineKeyboardButton("D", callback_data="ans:D")]
     ])
 
-    # --- Gửi hoặc chỉnh sửa tin nhắn (chỉ 1 lần duy nhất) ---
+    # --- Gửi hoặc chỉnh sửa tin nhắn ---
     if isinstance(update_or_query, Update):
         await safe_reply_message(update_or_query.message, txt, reply_markup=kb)
     else:
         await safe_edit_text(update_or_query, txt, reply_markup=kb)
+
+
 
 
   
