@@ -118,6 +118,8 @@ POLICY_CHAT = (
     "but most of your reply should remain in simple English."
     "If the student asks for an explanation, dialogue, or story — respond fully and clearly. "
     "If the message sounds like casual chat, reply briefly and naturally. "
+    " If the student gives a list of words or phrases, you can help by creating short sentences, questions, or a short paragraph using them."
+    " Always keep vocabulary and grammar at A2–B1+ level and explain briefly if needed."
     "You can discuss academic topics *in English* for learning purposes, "
     "but do not perform calculations, write code, or complete homework tasks. "
     "Keep your tone friendly, supportive, and age-appropriate. "
@@ -148,6 +150,71 @@ def blocked(text: str) -> bool:
             return True
     return False
 
+# =========================================================
+# 12.1 REFLECTIVE MODE (NEW, FIXED)
+# =========================================================
+
+REFLECT_Q = {
+    "ru": [
+        {"id": 1, "text": "1. Вы пересматривали материал перед уроком?", 
+         "options": ["Да", "Нет"]},
+
+        {"id": 2, "text": "2. Вы проверяли свои ошибки после выполнения задания?", 
+         "options": ["Да, с помощью чат-бота", "Да, самостоятельно", "Нет"]},
+
+        {"id": 3, "text": "3. Какой ИИ-инструмент вы использовали чаще всего?", 
+         "options": ["Чат-бот", "Видео", "Викторина", "Ничего"]},
+
+        {"id": 4, "text": "4. Был ли вам понятен материал этой темы?", 
+         "options": ["Да, полностью", "Частично", "Нет"]},
+
+        {"id": 5, "text": "5. Оцените свою ответственность за обучение (1–5)",
+         "options": ["1", "2", "3", "4", "5"]},
+
+        {"id": 6, "text": "6. Что у вас получилось лучше всего на этой неделе?",
+         "options": []},
+
+        {"id": 7, "text": "7. Что было самым трудным и почему?",
+         "options": []},
+    ],
+
+    "en": [
+        {"id": 1, "text": "1. Did you review the material before class?",
+         "options": ["Yes", "No"]},
+
+        {"id": 2, "text": "2. Did you check your mistakes after assignments?",
+         "options": ["Yes, using the chatbot", "Yes, by myself", "No"]},
+
+        {"id": 3, "text": "3. Which AI tool did you use most?",
+         "options": ["Chatbot", "Videos", "Quiz", "Used nothing"]},
+
+        {"id": 4, "text": "4. Was the topic clear?",
+         "options": ["Completely clear", "Partially", "Not clear"]},
+
+        {"id": 5, "text": "5. Rate your responsibility this week (1–5)",
+         "options": ["1", "2", "3", "4", "5"]},
+
+        {"id": 6, "text": "6. What did you do best this week?",
+         "options": []},
+
+        {"id": 7, "text": "7. What was the hardest part and why?",
+         "options": []},
+    ]
+}
+
+# =========================================================
+# REFLECTIVE MODE KEYBOARDS
+# =========================================================
+
+def reflect_keyboard(qid, options):
+    """
+    Build inline keyboard for reflective multiple-choice questions.
+    """
+    rows = []
+    for opt in options:
+        cb = f"reflect:ans:{qid}:{opt}"
+        rows.append([InlineKeyboardButton(opt, callback_data=cb)])
+    return InlineKeyboardMarkup(rows)
 
 # =========================================================
 # 4) STATE & PREFS
@@ -284,7 +351,8 @@ def main_menu(lang="en") -> InlineKeyboardMarkup:
              InlineKeyboardButton("📝 Практика", callback_data="menu:practice")],
             [InlineKeyboardButton("🏫 Класс", callback_data="menu:grade"),
              InlineKeyboardButton("🌐 Язык", callback_data="menu:lang")],
-            [InlineKeyboardButton("❓ Помощь", callback_data="menu:help")]
+            [InlineKeyboardButton("🪞 Рефлексия", callback_data="menu:reflect"),
+             InlineKeyboardButton("❓ Помощь", callback_data="menu:help")]
         ]
     else:
         kb = [
@@ -292,10 +360,10 @@ def main_menu(lang="en") -> InlineKeyboardMarkup:
              InlineKeyboardButton("📝 Practice", callback_data="menu:practice")],
             [InlineKeyboardButton("🏫 Grade", callback_data="menu:grade"),
              InlineKeyboardButton("🌐 Language", callback_data="menu:lang")],
-            [InlineKeyboardButton("❓ Help", callback_data="menu:help")]
+            [InlineKeyboardButton("🪞 Reflect", callback_data="menu:reflect"),
+             InlineKeyboardButton("❓ Help", callback_data="menu:help")]
         ]
     return InlineKeyboardMarkup(kb)
-
 
 def practice_menu(lang="en") -> InlineKeyboardMarkup:
     if lang == "ru":
@@ -830,16 +898,14 @@ async def build_mcq(topic_or_text: str, ui_lang: str, level: str, flavor: str = 
             continue
         ans = str(q.get("answer", "A")).strip().upper()
         if ans not in ("A", "B", "C", "D"):
-            ans = random.choice([ "A", "B", "C", "D"])
-        valid.append({
-            "id": q.get("id", len(valid) + 1),
-            "question": q.get("question", ""),
-            "options": opts,
-            "answer": ans,
-            "explain_en": q.get("explain_en", ""),
-            "explain_ru": q.get("explain_ru", "")
-        })
-
+            # attempt to detect correct option from explanation
+             expl = q.get("explain_en","") + q.get("question","")
+             for letter, opt in zip(["A","B","C","D"], opts):
+                if opt.lower() in expl.lower():
+                    ans = letter
+                    break
+             if ans not in ["A","B","C","D"]:
+                ans = random.choice(["A","B","C","D"])
     return valid
 
 
@@ -896,10 +962,11 @@ async def send_practice_item(update_or_query, context: ContextTypes.DEFAULT_TYPE
 
     # --- Thêm các lựa chọn (đã shuffle) ---
     for i, opt in enumerate(options):
+        label = chr(65 + i)  # 65 = 'A'
         clean_opt = opt.strip().replace("\n", " ")
         if len(clean_opt) > 300:
             clean_opt = clean_opt[:300] + "..."
-        txt += f"{letters[i]}) {clean_opt}\n"
+        txt += f"{label}) {clean_opt}\n"
 
     # --- Nút chọn đáp án (2 hàng, gọn gàng) ---
     kb = InlineKeyboardMarkup([
@@ -1003,7 +1070,6 @@ async def practice_summary(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "score": score,
         "total": total
     })
-   
 
 # =========================================================
 # 12) CALLBACK HANDLER
@@ -1187,11 +1253,7 @@ async def on_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
         lang = prefs.get("lang", "en")
         level = prefs.get("cefr", "A2")
 
-        await safe_edit_text(
-            q,
-            f"🧩 Generating {group.capitalize()} - {flavor.capitalize()} practice... Please wait."
-        )
-
+     
         # 🧠 Map nhóm + flavor thành flavor_key chuẩn cho build_mcq
         flavor_key = f"{group}_{flavor}"
 
@@ -1275,7 +1337,9 @@ async def on_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await log_event(context, "practice_start", uid, {"group": group, "flavor": flavor})
         return
 
-
+    if data == "menu:reflect":
+        lang = prefs.get("lang", "en")
+        return await start_reflect(update, context, lang)
 
 
           # === VOCABULARY QUICK QUIZ (Practice this word) ===
@@ -1292,8 +1356,11 @@ async def on_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
         flavors = ["vocab_synonyms", "vocab_antonyms", "vocab_context"]
         all_items = []
         for f in flavors:
-            sub = await build_mcq(word, lang, prefs["cefr"], flavor=f)
-            all_items.extend(sub[:1])   # chỉ lấy 1 câu mỗi loại 
+            try:
+                sub = await build_mcq(word, lang, prefs["cefr"], flavor=f)
+                all_items.extend(sub[:1])   # chỉ lấy 1 câu mỗi loại 
+            except Exception as e:
+                logger.warning(f"vocab:quiz build_mcq failed for {f}: {e}")
 
         # 🔍 Lọc trùng câu hỏi nếu có
         seen = set()
@@ -1500,7 +1567,7 @@ async def on_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await asyncio.sleep(1)
 
         # Sinh 5 câu hỏi chi tiết dựa theo đoạn đọc
-        items = await build_mcq(passage, lang, prefs["cefr"], flavor="reading_detail")
+        items = await build_mcq(passage, lang, prefs["cefr"], flavor="reading_details")
         items = items[:5]
 
         if not items:
@@ -1520,8 +1587,6 @@ async def on_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await log_event(context, "reading_practice_start", uid, {"topic": topic, "count": len(items)})
         return
 
-
-
 # === NUDGE MINI-QUIZ CALLBACK ===
     if data == "nudge:start":
         reset_nudge(context)
@@ -1533,8 +1598,9 @@ async def on_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
         flavor = "vocab_syn"  # mặc định nếu không xác định được
 
         if last_practice:
-            # Nếu đang học grammar
+            # Nếu đang học grammar            
             if "grammar" in last_practice.get("type", ""):
+
                 topic = last_practice.get("topic", "grammar practice")
                 flavor = random.choice(["grammar_verb", "grammar_error", "grammar_order"])
             # Nếu đang học reading
@@ -1641,7 +1707,6 @@ async def on_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
 
-
     # === FOOTER AGAIN CALLBACK ===
     if data == "footer:again":
         st = context.user_data.get("practice")
@@ -1676,7 +1741,7 @@ async def on_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
             elif scope == "reading":
                 # --- Reading practice regeneration ---
                 passage = context.user_data.get("last_passage", "")
-                items = await build_mcq(passage, lang, prefs["cefr"], flavor="reading_detail")
+                items = await build_mcq(passage, lang, prefs["cefr"], flavor="reading_details")
                 items = items[:5]
 
             else:
@@ -1846,6 +1911,105 @@ async def talk_coach(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     {"topic": topic, "turns": state["turns"]})
 
 
+# =========================================================
+# 11.x REFLECTIVE MODE ENGINE (SELF-ASSESSMENT SYSTEM)
+# =========================================================
+
+async def reflect_start(update_or_query, context, lang):
+    """Khởi động mode phản tư"""
+    context.user_data["reflect"] = {"step": 1, "answers": []}
+
+    q = REFLECT_Q[lang][0]
+    await send_reflect_question(update_or_query, q)
+    
+
+async def send_reflect_question(update_or_query, q):
+    text = q["text"]
+
+    # multiple choice
+    if q["options"]:
+        kb = reflect_keyboard(q["id"], q["options"])
+    else:
+        # open text
+        kb = InlineKeyboardMarkup([
+            [InlineKeyboardButton("⬅️ Cancel", callback_data="menu:root")]
+        ])
+
+    if hasattr(update_or_query, "callback_query"):
+        await safe_edit_text(update_or_query.callback_query, text, reply_markup=kb)
+    else:
+        await safe_reply_message(update_or_query.message, text, reply_markup=kb)
+
+
+async def reflect_handle_text(update, context):
+    st = context.user_data["reflect"]
+    step = st["step"]
+    st["answers"].append(update.message.text)
+
+    if step >= 7:
+        return await reflect_finalize(update, context)
+
+    st["step"] += 1
+    lang = get_prefs(update.effective_user.id)["lang"]
+    q = REFLECT_Q[lang][step]     # 0-index
+    await send_reflect_question(update, q)
+
+
+async def reflect_handle_choice(update_or_query, context, qid, choice):
+    st = context.user_data["reflect"]
+    st["answers"].append(choice)
+
+    if qid >= 7:
+        return await reflect_finalize(update_or_query, context)
+
+    st["step"] = qid + 1
+    lang = get_prefs(update_or_query.effective_user.id)["lang"]
+    q = REFLECT_Q[lang][qid]   # because list is 0-indexed
+    await send_reflect_question(update_or_query, q)
+
+
+async def reflect_finalize(update_or_query, context):
+    """Tổng kết và phân tích phản tư"""
+    st = context.user_data.get("reflect")
+    answers = st["answers"]
+    lang = get_prefs(update_or_query.effective_user.id)["lang"]
+
+    a6 = answers[5]
+    a7 = answers[6]
+    score = int(answers[4])
+
+    # --- simple interpretation ---
+    strong = a6
+    weak = a7
+    if score <= 2:
+        responsibility = "Try planning small steps each day." if lang=="en" else "Попробуйте планировать маленькие шаги каждый день."
+    else:
+        responsibility = "Great! You are becoming more responsible." if lang=="en" else "Отлично! Вы становитесь более самостоятельными."
+
+    txt = (
+        "📝 Your Reflection Results:\n\n"
+        f"⭐ Strengths:\n• {strong}\n\n"
+        f"⚠ Difficulties:\n• {weak}\n\n"
+        f"💡 Advice:\n• {responsibility}\n"
+    ) if lang=="en" else (
+        "📝 Ваши результаты рефлексии:\n\n"
+        f"⭐ Сильные стороны:\n• {strong}\n\n"
+        f"⚠ Трудности:\n• {weak}\n\n"
+        f"💡 Рекомендации:\n• {responsibility}\n"
+    )
+
+    kb = InlineKeyboardMarkup([
+        [InlineKeyboardButton("🏠 Menu", callback_data="menu:root")]
+    ])
+
+    if hasattr(update_or_query, "callback_query"):
+        await safe_edit_text(update_or_query.callback_query, txt, reply_markup=kb)
+    else:
+        await safe_reply_message(update_or_query.message, txt, reply_markup=kb)
+
+    # clear mode
+    context.user_data.pop("reflect", None)
+
 
 # --- Nudge mini-quiz ---
 def increment_nudge(context):
@@ -1905,42 +2069,58 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 # ✅ 2. Xác định intent sớm, trước khi xử lý grammar hint
+
+    # ✅ 2️⃣ Prompt-locked intent detection
     t = text.lower()
     intent = "chat"
-    if re.search(r"\bread\b|\btext\b|\bwrite\b|\btranslate\b|\bgloss\b", t):
-        intent = "reading"
-    elif re.search(r"\bdefine\b|\bmeaning of\b", t):
-        intent = "vocab"
-    elif re.search(r"\bgrammar\b|\btense\b|\bexplain\b|\brule\b", t):
-        intent = "grammar"
-    elif re.search(r"\btalk\b|\bconversation\b|\bspeak\b", t):
-        # Chỉ kích hoạt Talk Mode nếu học sinh đã vào mode talk qua menu
-        if prefs.get("mode") == "talk":
-            intent = "talk"
-        else:
-            intent = "chat"   # vẫn coi là chat bình thường
-    elif re.search(r"\bquiz\b|\bpractice\b|\bexercise\b", t):
-        intent = "practice"
 
+     # --- VOCABULARY ---
+    if re.fullmatch(r"define\s+['\"]?.+['\"]?", t.strip()):
+        intent = "vocab"
+
+    # --- GRAMMAR ---
+    elif re.fullmatch(r"explain\s+['\"]?.+['\"]?", t.strip()):
+        intent = "grammar"
+
+    # --- READING ---
+    elif re.fullmatch(r"write\s+(a\s+short\s+)?(a1|a2|b1|b1\+)?\s*text\s+about\s+['\"]?.+['\"]?", t.strip()) \
+        or re.fullmatch(r"translate\s+gloss\s+for\s+this\s+text[:\-]?\s*.+", t.strip()):
+        intent = "reading"
+
+    # --- TALK ---
+    elif re.fullmatch(r"let'?s\s+talk\s+about\s+.+", t.strip()):
+        intent = "talk"
+
+    logger.info(f"🎯 Prompt-locked intent: {intent}")
+
+    # === HANDLE REFLECT OPEN QUESTIONS ===
+    if "reflect" in context.user_data:
+        return await reflect_handle_text(update, context)
 
 
         # --- OUT-OF-SCOPE FILTER (Math, Science, etc.) ---
-    out_of_scope = [
-        r"\bsolve\b", r"\bcalculate\b", r"\bhow much\b", r"\bformula\b",
-        r"\bphysics\b", r"\bchemistry\b", r"\bmath\b", r"\bgeometry\b",
-        r"\bequation\b", r"\bsquare root\b", r"\btriangle\b", r"\bvolume\b",
-        r"\bmolecule\b", r"\bchemical\b", r"\bderive\b", r"\bproof\b",
-        r"\bintegral\b", r"\bderivative\b", r"\blogarithm\b", r"\btheorem\b"
+    out_of_scope_patterns = [
+        r"\bsolve\s+\d",            # solve 2x+5=10
+        r"\bcalculate\s+\d",        # calculate 45/3
+        r"\btriangle\s+area",       # geometry
+        r"\bvolume\s+of",           # physics/math
+        r"\bderivative\s+of",       # calculus
+        r"\bintegral\s+of",         # calculus
+        r"\bchemical\s+equation",   # chemistry
+        r"\bperiodic\s+table",      # chemistry
+        r"\bphysics\b",             # explicit mentions
+        r"\bchemistry\b"
     ]
-    for pattern in out_of_scope:
+    for pattern in out_of_scope_patterns:
         if re.search(pattern, text.lower()):
             msg = (
-                "I'm your English learning assistant. 😊 "
-                "I can help with vocabulary, grammar, reading, or speaking — "
-                "but not with math or science tasks."
+                "I’m here to help with *English learning only* 😊 "
+                "I can explain vocabulary, grammar, reading texts, or conversation — "
+                "but I can't solve math/physics tasks."
                 if lang != "ru" else
-                "Я помогаю изучать английский 😊 — словарь, грамматика, чтение, разговор, "
-                "но не решаю задачи по математике или физике."
+                "Я помогаю только с английским 😊 "
+                "могу объяснить слова, грамматику, чтение или разговор — "
+                "но не решаю задачи по математике/физике."
             )
             await safe_reply_message(update.message, msg)
             await log_event(context, "out_of_scope", uid, {"query": text})
@@ -2431,6 +2611,7 @@ async def run_bot():
     # Handlers
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("menu", handle_menu))
+    application.add_handler(CommandHandler("reflect_mode", start_reflect))
     application.add_handler(CommandHandler("help", help_cmd))
     application.add_handler(CommandHandler("clear", clear_chat))
     application.add_handler(CallbackQueryHandler(on_cb))
