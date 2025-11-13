@@ -1024,8 +1024,16 @@ REFLECT_Q = {
         {"id": 4, "text": "4. Был ли вам понятен материал этой темы?", 
          "options": ["Да, полностью", "Частично", "Нет, было сложно"]},
 
-        {"id": 5, "text": "5. Оцените свою ответственность за обучение (1–5):",
-         "options": ["1", "2", "3", "4", "5"]},
+        {"id": 5, 
+         "text": "5. Оцените свою ответственность за обучение (1–5):",
+         "options": [
+             "1 — совсем не чувствовал(а)",
+             "2 — немного чувствовал(а)",
+             "3 — средний уровень",
+             "4 — довольно сильно чувствовал(а)",
+             "5 — очень сильно чувствовал(а)"
+         ]
+        },
 
         {"id": 6, "text": "6. Что у вас получилось лучше всего на этой неделе?",
          "options": []},
@@ -1048,7 +1056,14 @@ REFLECT_Q = {
          "options": ["Yes, completely", "Partly", "No, it was difficult"]},
 
         {"id": 5, "text": "5. Rate your responsibility for learning this week (1–5):",
-         "options": ["1", "2", "3", "4", "5"]},
+         "options": [
+             "1 — I did not feel responsible",
+             "2 — I felt a little responsible",
+             "3 — I felt somewhat responsible",
+             "4 — I felt quite responsible",
+             "5 — I felt very responsible"
+         ]
+        },
 
         {"id": 6, "text": "6. What went best for you this week?",
          "options": []},
@@ -1097,14 +1112,16 @@ async def reflect_handle_text(update, context):
     step = st["step"]
 
     st["answers"].append(update.message.text)
+    # Because step is 1-based, REFLECT_Q index is 0-based
+    index = step   # step=6 → index=6 → Q7
 
-    # move next or finalize
-    if step >= 7:
+    if index >= 7:
         return await reflect_finalize(update, context)
 
-    st["step"] += 1
+    st["step"] = step + 1
+    next_index = index + 1
     lang = get_prefs(update.effective_user.id)["lang"]
-    q = REFLECT_Q[lang][step]     # 0-indexed
+    q = REFLECT_Q[lang][next_index]  # qid is (1-based), but index = qid
     await send_reflect_question(update, q)
 
 
@@ -1118,8 +1135,9 @@ async def reflect_handle_choice(update_or_query, context, qid, choice):
         return await reflect_finalize(update_or_query, context)
 
     st["step"] = qid + 1
+    next+index - quid
     lang = get_prefs(update_or_query.effective_user.id)["lang"]
-    q = REFLECT_Q[lang][qid]    # because data is 0-indexed
+    q = REFLECT_Q[lang][next_index]    # because data is 0-indexed
     await send_reflect_question(update_or_query, q)
 
 
