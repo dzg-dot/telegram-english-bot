@@ -1228,7 +1228,12 @@ async def on_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await safe_edit_text(q, msg, reply_markup=main_menu(lang))
         await log_event(context, "menu_root", uid, {})
         return
-
+     # === REFLECT MODE ENTRY ===
+    if data == "menu:reflect":
+        lang = get_prefs(uid)["lang"]
+        context.user_data.pop("reflect", None)
+        await reflect_start(update, context, lang)
+        return
 
     # === LANGUAGE SELECT ===
     if data == "menu:lang":
