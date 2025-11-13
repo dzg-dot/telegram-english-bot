@@ -1174,6 +1174,14 @@ async def reflect_finalize(update_or_query, context):
     # clean mode
     context.user_data.pop("reflect", None)
 
+# =========================================================
+# REFLECT COMMAND WRAPPER (for /reflect_mode)
+# =========================================================
+async def start_reflect(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """User triggers reflection through /reflect_mode"""
+    lang = get_prefs(update.effective_user.id)["lang"]
+    return await reflect_start(update, context, lang)
+
 
 # =========================================================
 # 12) CALLBACK HANDLER
