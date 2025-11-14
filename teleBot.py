@@ -1142,14 +1142,24 @@ async def reflect_finalize(update_or_query, context):
     answers = st["answers"]
 
     # Validate đủ 7 câu
+    # (Nếu thiếu thì trả về bằng message hoặc callback message)
     if len(answers) < 7:
-        return await safe_reply_message(
-            update_or_query.message if hasattr(update_or_query, "message") else update_or_query.callback_query.message,
-            "Reflection incomplete. Please try again."
-        )
+        target_msg = None
+        if hasattr(update_or_query, "message") and update_or_query.message:
+            target_msg = update_or_query.message
+        elif hasattr(update_or_query, "callback_query") and update_or_query.callback_query:
+            target_msg = update_or_query.callback_query.message
+
+        if target_msg:
+            return await safe_reply_message(
+                target_msg,
+                "Reflection incomplete. Please try again."
+            )
+        return
 
     lang = get_prefs(update_or_query.effective_user.id)["lang"]
 
+    # Extract answers (already guaranteed length >= 7)
     a6 = answers[5]
     a7 = answers[6]
 
@@ -1182,18 +1192,24 @@ async def reflect_finalize(update_or_query, context):
 
     kb = InlineKeyboardMarkup([[InlineKeyboardButton("🏠 Menu", callback_data="menu:root")]])
 
-    if hasattr(update_or_query, "callback_query"):
+    # ---- SEND RESULT SAFELY ----
+    # Case 1: reflect came from callback (Q1–Q5 buttons)
+    if hasattr(update_or_query, "callback_query") and update_or_query.callback_query:
         await safe_edit_text(update_or_query.callback_query, txt, reply_markup=kb)
     else:
+        # Case 2: reflect came from text (Q6–Q7)
         await safe_reply_message(update_or_query.message, txt, reply_markup=kb)
 
-    # Log
+    # ---- LOG TO GOOGLE SHEET ----
     try:
         await log_event(context, "reflect", update_or_query.effective_user.id, {"answers": answers})
     except:
         pass
 
+    # ---- CLEAR STATE ----
     context.user_data.pop("reflect", None)
+    prefs = get_prefs(update_or_query.effective_user.id)
+    prefs["mode"] = "chat"
 
 
 # ---------- 8) COMMAND WRAPPER ----------
