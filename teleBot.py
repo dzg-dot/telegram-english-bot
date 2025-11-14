@@ -1075,9 +1075,10 @@ def reflect_keyboard(qid, options):
 
 # ---------- 3) START REFLECTION ----------
 async def reflect_start(update_or_query, context, lang):
+    uid = update_or_query.effective_user.id
     prefs = get_prefs(update_or_query.effective_user.id)
     prefs["mode"] = "reflect"
-    save_prefs(...)
+    save_prefs(uid, prefs)
 
     context.user_data["reflect"] = {"step": 1, "answers": []}
     q = REFLECT_Q[lang][0]
@@ -1240,7 +1241,7 @@ async def reflect_finalize(update_or_query, context):
     context.user_data.pop("reflect", None)
     prefs = get_prefs(update_or_query.effective_user.id)
     prefs["mode"] = "chat"
-    save_prefs(...)
+    save_prefs(update_or_query.effective_user.id, prefs)
 
 # ---------- 8) COMMAND WRAPPER ----------
 async def start_reflect(update: Update, context: ContextTypes.DEFAULT_TYPE):
