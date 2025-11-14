@@ -2161,9 +2161,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return 
 
     # === INTENT DETECTION ===
-# ✅ 2. Xác định intent sớm, trước khi xử lý grammar hint
-
-    # ✅ 2️⃣ Prompt-locked intent detection
     t = text.lower()
     intent = "chat"
 
