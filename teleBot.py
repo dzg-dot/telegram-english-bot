@@ -1075,11 +1075,13 @@ def reflect_keyboard(qid, options):
 
 # ---------- 3) START REFLECTION ----------
 async def reflect_start(update_or_query, context, lang):
-    # step = 1..7 ; index = step-1
-    context.user_data["reflect"] = {"step": 1, "answers": []}
-    q = REFLECT_Q[lang][0]   # Q1
-    await send_reflect_question(update_or_query, q)
+    prefs = get_prefs(update_or_query.effective_user.id)
+    prefs["mode"] = "reflect"
+    save_prefs(...)
 
+    context.user_data["reflect"] = {"step": 1, "answers": []}
+    q = REFLECT_Q[lang][0]
+    await send_reflect_question(update_or_query, q)
 
 # ---------- 4) SEND QUESTION ----------
 async def send_reflect_question(update_or_query, q):
@@ -1131,6 +1133,7 @@ async def reflect_handle_choice(update_or_query, context, qid, choice):
     st["step"] = qid + 1
     q = REFLECT_Q[lang][st["step"] - 1]
     await send_reflect_question(update_or_query, q)
+
 
 # ---------- 7) FINALIZE REFLECTION (with AI advice) ----------
 async def reflect_finalize(update_or_query, context):
@@ -1237,7 +1240,7 @@ async def reflect_finalize(update_or_query, context):
     context.user_data.pop("reflect", None)
     prefs = get_prefs(update_or_query.effective_user.id)
     prefs["mode"] = "chat"
-
+    save_prefs(...)
 
 # ---------- 8) COMMAND WRAPPER ----------
 async def start_reflect(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -2145,16 +2148,17 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         lang = detect_lang(text)
 
     # === REFLECT MODE OVERRIDE ===
-    if "reflect" in context.user_data:
-        st = context.user_data["reflect"]
-        step = st.get("step", 1)
+    if prefs.get("mode") == "reflect":
+        if "reflect" in context.user_data:
+            st = context.user_data["reflect"]
+            step = st.get("step", 1)
 
-        # Q6–Q7 nhận text
-        if step >= 6:
-            return await reflect_handle_text(update, context)
+            # Q6–Q7 nhận text
+            if step >= 6:
+                return await reflect_handle_text(update, context)
 
-        # Q1–Q5: text không hợp lệ → hướng dẫn học sinh bấm nút
-        return 
+            # Q1–Q5: text không hợp lệ → hướng dẫn học sinh bấm nút
+            return 
 
 # ✅ 2. Xác định intent sớm, trước khi xử lý grammar hint
 
