@@ -1263,6 +1263,7 @@ async def on_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # === REFLECT CALLBACKS (PHẢI ĐỂ TRÊN CÙNG) ===
     if data == "menu:reflect":
         lang = prefs["lang"]
+        prefs["mode"] = "reflect"   # 🟢 BẮT BUỘC
         context.user_data.pop("reflect", None)
         return await reflect_start(update, context, lang)
 
@@ -2148,7 +2149,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         lang = detect_lang(text)
 
     # === REFLECT MODE OVERRIDE ===
-    if prefs.get("mode") == "reflect":
+    if prefs.get("mode") == "reflect" and "reflect" in context.user_data:
         if "reflect" in context.user_data:
             st = context.user_data["reflect"]
             step = st.get("step", 1)
@@ -2160,7 +2161,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             # Q1–Q5: text không hợp lệ → hướng dẫn học sinh bấm nút
             return 
 
-
+    # === INTENT DETECTION ===
 # ✅ 2. Xác định intent sớm, trước khi xử lý grammar hint
 
     # ✅ 2️⃣ Prompt-locked intent detection
