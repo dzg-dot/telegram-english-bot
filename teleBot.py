@@ -2127,10 +2127,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return await reflect_handle_text(update, context)
 
         # Q1–Q5: text không hợp lệ → hướng dẫn học sinh bấm nút
-        return await safe_reply_message(update.message,
-            "Please use the buttons above to answer."
-        )
-
+        return 
 
 # ✅ 2. Xác định intent sớm, trước khi xử lý grammar hint
 
