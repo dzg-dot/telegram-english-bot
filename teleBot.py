@@ -2160,7 +2160,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             # Q1–Q5: text không hợp lệ → hướng dẫn học sinh bấm nút
             return 
 
-    # === INTENT DETECTION ===
+
+# ✅ 2. Xác định intent sớm, trước khi xử lý grammar hint
+
+    # ✅ 2️⃣ Prompt-locked intent detection
     t = text.lower()
     intent = "chat"
 
