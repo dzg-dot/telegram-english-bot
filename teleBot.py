@@ -1132,8 +1132,7 @@ async def reflect_handle_choice(update_or_query, context, qid, choice):
     q = REFLECT_Q[lang][st["step"] - 1]
     await send_reflect_question(update_or_query, q)
 
-
-# ---------- 7) FINALIZE REFLECTION ----------
+# ---------- 7) FINALIZE REFLECTION (with AI advice) ----------
 async def reflect_finalize(update_or_query, context):
     st = context.user_data.get("reflect")
     if not st:
@@ -1141,72 +1140,100 @@ async def reflect_finalize(update_or_query, context):
 
     answers = st["answers"]
 
-    # Validate đủ 7 câu
-    # (Nếu thiếu thì trả về bằng message hoặc callback message)
-    if len(answers) < 7:
-        target_msg = None
-        if hasattr(update_or_query, "message") and update_or_query.message:
-            target_msg = update_or_query.message
-        elif hasattr(update_or_query, "callback_query") and update_or_query.callback_query:
-            target_msg = update_or_query.callback_query.message
+    # --- Validate đủ 7 câu ---
+    target_msg = None
+    if hasattr(update_or_query, "message") and update_or_query.message:
+        target_msg = update_or_query.message
+    elif hasattr(update_or_query, "callback_query") and update_or_query.callback_query:
+        target_msg = update_or_query.callback_query.message
 
+    if len(answers) < 7:
         if target_msg:
-            return await safe_reply_message(
-                target_msg,
-                "Reflection incomplete. Please try again."
-            )
+            await safe_reply_message(target_msg, "Reflection incomplete. Please try again.")
         return
 
+    # --- Extract data ---
     lang = get_prefs(update_or_query.effective_user.id)["lang"]
 
-    # Extract answers (already guaranteed length >= 7)
-    a6 = answers[5]
-    a7 = answers[6]
+    a1, a2, a3, a4, a5 = answers[:5]     # MCQ answers
+    a6 = answers[5]                      # Strengths
+    a7 = answers[6]                      # Difficulties
 
     try:
-        score = int(answers[4])
+        score = int(a5)
     except:
-        score = 3  # fallback an toàn
+        score = 3  # fallback
 
-    resp = (
-        "Try planning small steps each day."
-        if score <= 2 else
-        "Great! You are becoming more responsible."
-    ) if lang == "en" else (
-        "Попробуйте планировать маленькие шаги каждый день."
-        if score <= 2 else
-        "Отлично! Вы становитесь более самостоятельными."
+    # ============================================================
+    # 🔥 AI-generated personalized advice
+    # ============================================================
+
+    # Prompt xây dựng lời khuyên từ AI
+    advice_prompt = (
+        f"The student completed a 7-question reflection.\n\n"
+        f"1) Reviewed before class: {a1}\n"
+        f"2) Checked mistakes: {a2}\n"
+        f"3) AI tools used: {a3}\n"
+        f"4) Topic clarity: {a4}\n"
+        f"5) Responsibility (1–5): {score}\n"
+        f"6) Strengths: {a6}\n"
+        f"7) Difficulties: {a7}\n\n"
+        f"Write a short, warm, motivating advice (2–3 sentences) "
+        f"for a middle-school student. "
+        f"Use simple { 'English' if lang=='en' else 'Russian' }. "
+        f"Be encouraging and practical."
     )
 
-    txt = (
-        f"📝 Your Reflection Results:\n\n"
-        f"⭐️ Strengths:\n• {a6}\n\n"
-        f"⚠️ Difficulties:\n• {a7}\n\n"
-        f"💡 Advice:\n• {resp}"
-        if lang == "en" else
-        f"📝 Ваши результаты рефлексии:\n\n"
-        f"⭐️ Сильные стороны:\n• {a6}\n\n"
-        f"⚠️ Трудности:\n• {a7}\n\n"
-        f"💡 Рекомендации:\n• {resp}"
-    )
+    try:
+        advice = await ask_openai([
+            {"role": "system", "content": "You are a friendly and supportive school teacher."},
+            {"role": "user", "content": advice_prompt}
+        ], max_tokens=120)
+        advice = advice.strip()
+    except:
+        # fallback nếu AI không trả lời
+        advice = (
+            "Keep practicing a little every day — consistent effort helps you grow!"
+            if lang == "en" else
+            "Продолжай заниматься понемногу каждый день — постоянство принесёт результат!"
+        )
 
-    kb = InlineKeyboardMarkup([[InlineKeyboardButton("🏠 Menu", callback_data="menu:root")]])
+    # ============================================================
+    # 🔥 Build final result message
+    # ============================================================
 
-    # ---- SEND RESULT SAFELY ----
-    # Case 1: reflect came from callback (Q1–Q5 buttons)
+    if lang == "en":
+        txt = (
+            f"📝 Your Reflection Results:\n\n"
+            f"⭐️ Strengths:\n• {a6}\n\n"
+            f"⚠️ Difficulties:\n• {a7}\n\n"
+            f"💡 Personalized Advice:\n• {advice}"
+        )
+    else:
+        txt = (
+            f"📝 Ваши результаты рефлексии:\n\n"
+            f"⭐️ Сильные стороны:\n• {a6}\n\n"
+            f"⚠️ Трудности:\n• {a7}\n\n"
+            f"💡 Персональная рекомендация:\n• {advice}"
+        )
+
+    kb = InlineKeyboardMarkup([
+        [InlineKeyboardButton("🏠 Menu" if lang=="en" else "🏠 Меню", callback_data="menu:root")]
+    ])
+
+    # --- SEND OUTPUT SAFELY ---
     if hasattr(update_or_query, "callback_query") and update_or_query.callback_query:
         await safe_edit_text(update_or_query.callback_query, txt, reply_markup=kb)
     else:
-        # Case 2: reflect came from text (Q6–Q7)
         await safe_reply_message(update_or_query.message, txt, reply_markup=kb)
 
-    # ---- LOG TO GOOGLE SHEET ----
+    # --- LOG EVENT ---
     try:
         await log_event(context, "reflect", update_or_query.effective_user.id, {"answers": answers})
     except:
         pass
 
-    # ---- CLEAR STATE ----
+    # --- CLEAR STATE ---
     context.user_data.pop("reflect", None)
     prefs = get_prefs(update_or_query.effective_user.id)
     prefs["mode"] = "chat"
