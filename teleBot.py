@@ -1088,7 +1088,7 @@ async def send_reflect_question(update_or_query, q):
     else:
         kb = None  # Q6–7 không có nút
 
-    if hasattr(update_or_query, "callback_query"):
+    if getattr(update_or_query, "callback_query", None):
         await safe_edit_text(update_or_query.callback_query, q["text"], reply_markup=kb)
     else:
         await safe_reply_message(update_or_query.message, q["text"], reply_markup=kb)
