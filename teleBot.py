@@ -1012,19 +1012,19 @@ async def practice_summary(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # 🔵 1) DATA — Russian & English versions
 REFLECT_Q = {
     "ru": [
-        {"id": 1, "text": "1. Вы пересматривали материал перед уроком?", 
+        {"id": 1, "text": "1. Вы пересматривали материал перед уроком?",
          "options": ["Да", "Нет"]},
 
-        {"id": 2, "text": "2. Вы проверяли свои ошибки после выполнения задания?", 
+        {"id": 2, "text": "2. Вы проверяли свои ошибки после выполнения задания?",
          "options": ["Да, с помощью чат-бота", "Да, самостоятельно", "Нет"]},
 
-        {"id": 3, "text": "3. Какой ИИ-инструмент вы использовали чаще всего?", 
+        {"id": 3, "text": "3. Какой ИИ-инструмент вы использовали чаще всего?",
          "options": ["Чат-бот", "Видео", "Викторина", "Ничего не использовал(а)"]},
 
-        {"id": 4, "text": "4. Был ли вам понятен материал этой темы?", 
+        {"id": 4, "text": "4. Был ли вам понятен материал этой темы?",
          "options": ["Да, полностью", "Частично", "Нет, было сложно"]},
 
-        {"id": 5, 
+        {"id": 5,
          "text": "5. Оцените свою ответственность за обучение (1–5):",
          "options": [
              "1 — совсем не чувствовал(а)",
@@ -1043,19 +1043,20 @@ REFLECT_Q = {
     ],
 
     "en": [
-        {"id": 1, "text": "1. Did you review the material before class?", 
+        {"id": 1, "text": "1. Did you review the material before class?",
          "options": ["Yes", "No"]},
 
-        {"id": 2, "text": "2. Did you check your mistakes after finishing your tasks?", 
+        {"id": 2, "text": "2. Did you check your mistakes after finishing your tasks?",
          "options": ["Yes, using the chatbot", "Yes, by myself", "No"]},
 
-        {"id": 3, "text": "3. Which AI tool did you use most often?", 
+        {"id": 3, "text": "3. Which AI tool did you use most often?",
          "options": ["Chatbot", "Video", "Quiz", "I didn't use anything"]},
 
-        {"id": 4, "text": "4. Was this topic clear to you?", 
+        {"id": 4, "text": "4. Was this topic clear to you?",
          "options": ["Yes, completely", "Partly", "No, it was difficult"]},
 
-        {"id": 5, "text": "5. Rate your responsibility for learning this week (1–5):",
+        {"id": 5,
+         "text": "5. Rate your responsibility for learning this week (1–5):",
          "options": [
              "1 — I did not feel responsible",
              "2 — I felt a little responsible",
@@ -1085,10 +1086,10 @@ def reflect_keyboard(qid, options):
     return InlineKeyboardMarkup(rows)
 
 
-# 🔵 3) START REFLECTION
+# 🔵 3) START REFLECTION (used by menu + /reflect_mode)
 async def reflect_start(update_or_query, context, lang):
     context.user_data["reflect"] = {"step": 1, "answers": []}
-    q = REFLECT_Q[lang][0]
+    q = REFLECT_Q[lang][0]   # câu 1, index 0
     await send_reflect_question(update_or_query, q)
 
 
@@ -1096,9 +1097,12 @@ async def reflect_start(update_or_query, context, lang):
 async def send_reflect_question(update_or_query, q):
     text = q["text"]
 
-    # Build keyboard if options exist
-    kb = reflect_keyboard(q["id"], q["options"]) if q["options"] else \
-        InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Cancel", callback_data="menu:root")]])
+    if q["options"]:
+        kb = reflect_keyboard(q["id"], q["options"])
+    else:
+        kb = InlineKeyboardMarkup([
+            [InlineKeyboardButton("⬅️ Cancel", callback_data="menu:root")]
+        ])
 
     if hasattr(update_or_query, "callback_query"):
         await safe_edit_text(update_or_query.callback_query, text, reply_markup=kb)
@@ -1107,37 +1111,43 @@ async def send_reflect_question(update_or_query, q):
 
 
 # 🔵 5) HANDLE TEXT ANSWER (for Q6–Q7)
-async def reflect_handle_text(update, context):
-    st = context.user_data["reflect"]
-    step = st["step"]
+async def reflect_handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    st = context.user_data.get("reflect")
+    if not st:
+        return
 
+    step = st.get("step", 1)  # step = id câu hiện tại (1–7)
     st["answers"].append(update.message.text)
-    # Because step is 1-based, REFLECT_Q index is 0-based
-    index = step   # step=6 → index=6 → Q7
 
-    if index >= 7:
+    # Nếu đang ở câu 7 -> kết thúc
+    if step >= 7:
         return await reflect_finalize(update, context)
 
+    # Sang câu tiếp theo
     st["step"] = step + 1
-    next_index = index + 1
     lang = get_prefs(update.effective_user.id)["lang"]
-    q = REFLECT_Q[lang][next_index]  # qid is (1-based), but index = qid
+    next_index = step  # step=6 -> index 6 (Q7)
+    q = REFLECT_Q[lang][next_index]
     await send_reflect_question(update, q)
 
 
-# 🔵 6) HANDLE MULTIPLE CHOICE
-async def reflect_handle_choice(update_or_query, context, qid, choice):
-    st = context.user_data["reflect"]
+# 🔵 6) HANDLE MULTIPLE CHOICE (Q1–Q5)
+async def reflect_handle_choice(update_or_query, context, qid: int, choice: str):
+    st = context.user_data.get("reflect")
+    if not st:
+        return
+
     st["answers"].append(choice)
 
-    # If last question → finalize
+    # Nếu đã đến Q7 (trong tương lai) thì kết thúc
     if qid >= 7:
         return await reflect_finalize(update_or_query, context)
 
+    # Sang câu tiếp theo
     st["step"] = qid + 1
-    next+index - quid
     lang = get_prefs(update_or_query.effective_user.id)["lang"]
-    q = REFLECT_Q[lang][next_index]    # because data is 0-indexed
+    next_index = qid  # Q1 -> index 1 (Q2), Q5 -> index 5 (Q6)
+    q = REFLECT_Q[lang][next_index]
     await send_reflect_question(update_or_query, q)
 
 
@@ -1150,21 +1160,26 @@ async def reflect_finalize(update_or_query, context):
     answers = st["answers"]
     lang = get_prefs(update_or_query.effective_user.id)["lang"]
 
+    # an toàn: nếu thiếu câu trả lời thì fill rỗng
+    while len(answers) < 7:
+        answers.append("")
+
     a6 = answers[5]
     a7 = answers[6]
-    score = int(answers[4])
+    try:
+        score = int(answers[4][0]) if answers[4] else 3
+    except Exception:
+        score = 3
 
-    # responsibility score
     if score <= 2:
         resp = ("Try planning small steps each day."
-                if lang=="en" else
+                if lang == "en" else
                 "Попробуйте планировать маленькие шаги каждый день.")
     else:
         resp = ("Great! You are becoming more responsible."
-                if lang=="en" else
+                if lang == "en" else
                 "Отлично! Вы становитесь более самостоятельными.")
 
-    # BUILD SUMMARY TEXT
     txt_en = (
         "📝 Your Reflection Results:\n\n"
         f"⭐️ Strengths:\n• {a6}\n\n"
@@ -1179,18 +1194,19 @@ async def reflect_finalize(update_or_query, context):
         f"💡 Рекомендации:\n• {resp}"
     )
 
-    txt = txt_en if lang=="en" else txt_ru
+    txt = txt_en if lang == "en" else txt_ru
 
-    kb = InlineKeyboardMarkup([[InlineKeyboardButton("🏠 Menu", callback_data="menu:root")]])
+    kb = InlineKeyboardMarkup([
+        [InlineKeyboardButton("🏠 Menu", callback_data="menu:root")]
+    ])
 
-    # send final
     if hasattr(update_or_query, "callback_query"):
         await safe_edit_text(update_or_query.callback_query, txt, reply_markup=kb)
     else:
         await safe_reply_message(update_or_query.message, txt, reply_markup=kb)
 
-    # clean mode
     context.user_data.pop("reflect", None)
+
 
 # =========================================================
 # REFLECT COMMAND WRAPPER (for /reflect_mode)
@@ -1198,6 +1214,7 @@ async def reflect_finalize(update_or_query, context):
 async def start_reflect(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """User triggers reflection through /reflect_mode"""
     lang = get_prefs(update.effective_user.id)["lang"]
+    context.user_data.pop("reflect", None)
     return await reflect_start(update, context, lang)
 
 
@@ -1252,6 +1269,15 @@ async def on_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.user_data.pop("reflect", None)
         await reflect_start(update, context, lang)
         return
+# === REFLECT CALLBACKS ===
+    if data == "reflect:start":
+        lang = prefs.get("lang", "en")
+        return await reflect_start(update, context, lang)
+
+    if data.startswith("reflect:ans:"):
+        _, _, qid, choice = data.split(":", 3)
+        return await reflect_handle_choice(update, context, int(qid), choice)
+
 
     # === LANGUAGE SELECT ===
     if data == "menu:lang":
@@ -1304,15 +1330,6 @@ async def on_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await safe_edit_text(q, txt, reply_markup=kb)
         await log_event(context, "help_open", uid, {})
         return
-
-    # === REFLECT CALLBACKS ===
-    if data == "reflect:start":
-        lang = prefs.get("lang", "en")
-        return await reflect_start(update, context, lang)
-
-    if data.startswith("reflect:ans:"):
-        _, _, qid, choice = data.split(":", 3)
-        return await reflect_handle_choice(update, context, int(qid), choice)
 
 # === ENTER PRACTICE MENU FROM MAIN MENU ===
     if data == "menu:practice":
@@ -2105,6 +2122,13 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if lang == "auto":
         lang = detect_lang(text)
 
+    # Nếu đang ở reflect mode và câu hiện tại là open question (6–7)
+    if "reflect" in context.user_data:
+        st = context.user_data["reflect"]
+        step = st.get("step", 1)
+        # Q6 hoặc Q7 là câu mở, không có options → xử lý text
+        if step >= 6:
+            return await reflect_handle_text(update, context)
 
 # ✅ 2. Xác định intent sớm, trước khi xử lý grammar hint
 
