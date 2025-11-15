@@ -1553,27 +1553,9 @@ async def on_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 reply_markup=main_menu(lang)
             )
 
-       # 🧩 Chỉ gọi 1 lần build_mcq để tránh timeout
+        # 🔹 Gọi 1 lần build_mcq → tránh timeout
         sub = await build_mcq(word, lang, prefs["cefr"], flavor="vocab_mixed")
-
-        # Lấy 3 câu đầu
         items = sub[:3]
-
-        # 🔍 Lọc trùng câu hỏi nếu có
-        seen = set()
-        unique_items = []
-        for qu in all_items:
-            text = qu.get("question", "").strip().lower()
-            if text and text not in seen:
-                seen.add(text)
-                unique_items.append(qu)
-
-        # 🔢 Gán lại ID theo thứ tự
-        for i, qu in enumerate(unique_items, start=1):
-            qu["id"] = i
-
-        # 🎯 Giới hạn 3 câu hỏi
-        items = unique_items[:3]
 
         if not items:
             return await safe_edit_text(
@@ -1581,6 +1563,10 @@ async def on_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "⚠️ No quiz available.",
                 reply_markup=main_menu(lang)
             )
+
+        # 🔢 Gán lại ID
+        for i, qu in enumerate(items, start=1):
+            qu["id"] = i
 
         # 💾 Lưu trạng thái quiz
         context.user_data["practice"] = {
@@ -1593,13 +1579,13 @@ async def on_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "scope": "vocab_direct"
         }
 
-        # 📍 Đánh dấu đang ở layer bài tập độc lập
         context.user_data["menu_layer"] = "quiz"
 
         # 🚀 Gửi câu hỏi đầu tiên
         await send_practice_item(q, context)
         await log_event(context, "vocab_quiz", uid, {"word": word})
         return
+
 
         # === VOCAB MORE EXAMPLES (B1+ level) ===
     if data == "vocab:more":
@@ -1639,30 +1625,26 @@ async def on_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         # === GRAMMAR PRACTICE (with retry & summary footer) ===
     if data == "grammar:quiz":
-        topic = context.user_data.get("last_grammar_topic", "Present Simple")
+        topic = context.user_data.get("last_grammar_topic", "").strip()
         if not topic:
             return await safe_edit_text(q, "No grammar topic found.", reply_markup=main_menu(lang))
 
-        # 🔹 Sinh 3 câu hỏi ngữ pháp (chỉ 1 lần API)
+        # 🔹 Gọi 1 lần build_mcq
         sub = await build_mcq(topic, lang, prefs["cefr"], flavor="grammar_mixed")
-
-        # Lấy 3 câu đầu
         items = sub[:3]
 
-        # Sau khi tạo all_items
-        seen = set()
-        unique_items = []
-        for q in all_items:
-            q_text = q.get("question", "").strip().lower()
-            if q_text and q_text not in seen:
-                seen.add(q_text)
-                unique_items.append(q)
-        items = unique_items[:3]
-
         if not items:
-            return await safe_edit_text(q, "⚠️ No questions found.", reply_markup=main_menu(lang))
+            return await safe_edit_text(
+                q,
+                "⚠️ No questions found.",
+                reply_markup=main_menu(lang)
+            )
 
-        # 🔹 Lưu trạng thái luyện tập
+        # Gán lại ID
+        for i, qu in enumerate(items, start=1):
+            qu["id"] = i
+
+        # Lưu trạng thái luyện tập
         context.user_data["practice"] = {
             "type": "grammar",
             "topic": topic,
@@ -1670,12 +1652,12 @@ async def on_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "idx": 0,
             "score": 0,
             "ui_lang": lang,
-            "scope": "grammar",
-            "retry": False
+            "scope": "grammar"
         }
+
         context.user_data["menu_layer"] = "quiz"
 
-        # 🔹 Gửi câu hỏi đầu tiên
+        # 🚀 Gửi câu 1
         await send_practice_item(q, context)
         await log_event(context, "grammar_practice_start", uid, {"topic": topic, "count": len(items)})
         return
@@ -1749,40 +1731,46 @@ async def on_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
 
-    # === READING PRACTICE ===
     if data == "reading:quiz":
-        passage = (context.user_data.get("last_passage") or "").strip()
+        passage = context.user_data.get("last_passage", "").strip()
         topic = context.user_data.get("reading_topic", "reading")
 
         if not passage:
             return await safe_edit_text(q, "⚠️ No passage found.", reply_markup=main_menu(lang))
 
-        # Gửi lại đoạn passage cho học sinh đọc
+        # Gửi passage cho học sinh đọc (edit message)
         await safe_edit_text(q, f"📖 Text:\n\n{trim(passage[:1800])}")
-        await asyncio.sleep(1)
+        await asyncio.sleep(0.8)
 
-        # 🔹 Sinh câu hỏi đọc hiểu (1 lần API, type "reading_mixed")
+        # Gọi 1 lần build_mcq
         sub = await build_mcq(passage, lang, prefs["cefr"], flavor="reading_mixed")
-
-        # Lấy 5 câu đầu
         items = sub[:5]
 
         if not items:
-            return await safe_reply_message(
-                update.callback_query.message,
+            return await safe_edit_text(
+                q,
                 "⚠️ Could not generate reading questions.",
                 reply_markup=main_menu(lang)
             )
 
+        for i, qu in enumerate(items, start=1):
+            qu["id"] = i
+
         context.user_data["practice"] = {
-            "type": "reading", "topic": topic, "items": items,
-            "idx": 0, "score": 0, "ui_lang": lang, "scope": "reading"
+            "type": "reading",
+            "topic": topic,
+            "items": items,
+            "idx": 0,
+            "score": 0,
+            "ui_lang": lang,
+            "scope": "reading"
         }
         context.user_data["menu_layer"] = "quiz"
 
-        await send_practice_item(update.callback_query, context)
+        await send_practice_item(q, context)
         await log_event(context, "reading_practice_start", uid, {"topic": topic, "count": len(items)})
         return
+
 
 # === NUDGE MINI-QUIZ CALLBACK ===
     if data == "nudge:start":
@@ -1848,8 +1836,6 @@ async def on_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
 
-
-
         # === ANSWER HANDLING ===
     if data.startswith("ans:"):
         st = context.user_data.get("practice")
@@ -1904,7 +1890,7 @@ async def on_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
 
-    # === FOOTER AGAIN CALLBACK ===
+   # === FOOTER AGAIN CALLBACK ===
     if data == "footer:again":
         st = context.user_data.get("practice")
         if not st:
@@ -1913,56 +1899,75 @@ async def on_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
         scope = st.get("scope", "free")
         topic = st.get("topic", "English")
         lang = st.get("ui_lang", "en")
+        level = prefs.get("cefr", "A2")
 
         await safe_edit_text(q, "🔁 Creating a new practice set, please wait...")
 
         try:
-            if scope == "vocab":
-                # --- Vocabulary practice regeneration ---
-                flavors = ["vocab_syn", "vocab_ant", "vocab_cloze"]
-                all_items = []
-                for f in flavors:
-                    sub = await build_mcq(topic, lang, prefs["cefr"], flavor=f)
-                    all_items.extend(sub[:1])
-                items = all_items[:3]
+            # ==========================
+            # 🔹 VOCABULARY
+            # ==========================
+            if scope == "vocab" or scope == "vocab_direct":
+                word = st.get("topic", "").strip()
+                sub = await build_mcq(word, lang, level, flavor="vocab_mixed")
+                items = sub[:3]
 
+            # ==========================
+            # 🔹 GRAMMAR
+            # ==========================
             elif scope == "grammar":
-                # --- Grammar practice regeneration ---
-                flavors = ["grammar_verb", "grammar_error", "grammar_order"]
-                all_items = []
-                for f in flavors:
-                    sub = await build_mcq(topic, lang, prefs["cefr"], flavor=f)
-                    all_items.extend(sub[:1])
-                items = all_items[:3]
+                sub = await build_mcq(topic, lang, level, flavor="grammar_mixed")
+                items = sub[:3]
 
+            # ==========================
+            # 🔹 READING
+            # ==========================
             elif scope == "reading":
-                # --- Reading practice regeneration ---
                 passage = context.user_data.get("last_passage", "")
-                items = await build_mcq(passage, lang, prefs["cefr"], flavor="reading_details")
-                items = items[:5]
+                sub = await build_mcq(passage, lang, level, flavor="reading_details")
+                items = sub[:5]
 
+            # ==========================
+            # 🔹 DEFAULT / GENERIC
+            # ==========================
             else:
-                # --- Default generic practice ---
-                items = await build_mcq(topic, lang, prefs["cefr"], flavor="generic")
-                items = items[:5]
-
+                sub = await build_mcq(topic, lang, level, flavor="generic")
+                items = sub[:3]
+  
+            # ==========================
+            # 🔹 Validate
+            # ==========================
             if not items:
-                return await safe_edit_text(q, "⚠️ Could not create new questions.", reply_markup=main_menu(lang))
+                return await safe_edit_text(
+                    q,
+                    "⚠️ No questions found.",
+                    reply_markup=main_menu(lang)
+                )
 
-            # --- Reset state ---
-            context.user_data["menu_layer"] = "exercise"
+            # Gán lại ID cho items
+            for i, qu in enumerate(items, start=1):
+                qu["id"] = i
+
+            # ==========================
+            # 🔹 Reset state
+            # ==========================
             st.update({"items": items, "idx": 0, "score": 0})
+            context.user_data["practice"] = st
+            context.user_data["menu_layer"] = "exercise"
+
             await send_practice_item(q, context)
             await log_event(context, "practice_regenerated", uid, {"scope": scope, "topic": topic, "count": len(items)})
 
         except Exception as e:
             logger.warning(f"footer:again error: {e}")
-            await safe_edit_text(
+            return await safe_edit_text(
                 q,
                 "❌ Failed to restart practice. Please try again or go back to menu.",
                 reply_markup=main_menu(lang)
             )
+
         return
+
 
 
         # === TALK MODE ENTRY ===
