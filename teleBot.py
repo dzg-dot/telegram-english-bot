@@ -921,9 +921,15 @@ async def send_practice_item(update_or_query, context: ContextTypes.DEFAULT_TYPE
     # --- Thêm các lựa chọn (đã shuffle) ---
     for i, opt in enumerate(options):
         label = chr(65 + i)  # 65 = 'A'
-        clean_opt = opt.strip().replace("\n", " ")
+
+        # ❗❗ FIX DUPLICATE LABELS (A) A) ...)
+        clean_opt = opt.strip()
+        clean_opt = re.sub(r"^[A-D][\)\.\:\-\s]+", "", clean_opt)  # Xoá nhãn do model thêm
+
+        clean_opt = clean_opt.replace("\n", " ")
         if len(clean_opt) > 300:
             clean_opt = clean_opt[:300] + "..."
+
         txt += f"{label}) {clean_opt}\n"
 
     # --- Nút chọn đáp án (2 hàng, gọn gàng) ---
