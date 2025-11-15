@@ -787,34 +787,50 @@ async def build_mcq(topic_or_text: str, ui_lang: str, level: str, flavor: str = 
     else:
         diff_note = "Keep within A2–B1 school-level range."
 
+ 
+        # =========================
+    # 3️⃣ Construct model prompt (TỐI ƯU TOKEN)
     # =========================
-    # 3️⃣ Construct model prompt
-    # =========================
-    prefix = f"[Type: English MCQ | Focus: {flavor} | CEFR: {level}]\n"
 
-    prompt = (
-        f"{prefix}{task}\n\n"
-        "Return STRICT JSON only in this format:\n"
-        "{ \"questions\": ["
-        "{\"id\":1,\"question\":\"...\",\"options\":[\"...\",\"...\",\"...\",\"...\"],"
-        "\"answer\":\"A\",\"explain_en\":\"<=25 words\",\"explain_ru\":\"<=25 words\"},"
-        "{\"id\":2,...},...,{\"id\":5,...}]}\n\n"
-        f"LEVEL: {level} | {diff_note}\n"
-        f"TOPIC or INPUT:\n{topic_or_text}\n\n"
-        f"Language for question and options: {'Russian' if ui_lang=='ru' else 'English'}."
-    )
+    prompt = f"""
+Generate exactly 5 English MCQs (A–D).
+
+Output STRICT JSON only, in this exact structure:
+{{
+  "questions": [
+    {{
+      "id": 1,
+      "question": "text",
+      "options": ["A","B","C","D"],
+      "answer": "A",
+      "explain_en": "short"
+    }}
+  ]
+}}
+
+Rules:
+- Output ONLY JSON. No markdown.
+- No explanations outside JSON.
+- Each explanation <= 20 words.
+- Level: {level}
+- Focus: {flavor}
+- Topic: {topic_or_text}
+- Language: {"Russian" if ui_lang=='ru' else "English"}.
+"""
 
     msgs = [
-        {"role": "system", "content": POLICY_STUDY},
+        {"role": "system", "content": "You must output STRICT JSON only."},
         {"role": "user", "content": prompt}
     ]
 
-    logger.info(f"🧠 Generating MCQs | Type={flavor} | Level={level} | Lang={ui_lang}")
+    logger.info(f"🧠 MCQ | {flavor} | Level={level} | Lang={ui_lang}")
+
+
 
     # =========================
     # 4️⃣ Request from model
     # =========================
-    raw = await ask_openai(msgs, max_tokens=950)
+    raw = await ask_openai(msgs, max_tokens=450)
     try:
         data = json.loads(re.search(r"\{.*\}", raw, re.S).group())
         questions = data.get("questions", [])
@@ -833,13 +849,21 @@ async def build_mcq(topic_or_text: str, ui_lang: str, level: str, flavor: str = 
         ans = str(q.get("answer", "A")).strip().upper()
         if ans not in ("A", "B", "C", "D"):
             # attempt to detect correct option from explanation
-             expl = q.get("explain_en","") + q.get("question","")
-             for letter, opt in zip(["A","B","C","D"], opts):
+            expl = q.get("explain_en","") + q.get("question","")
+            for letter, opt in zip(["A","B","C","D"], opts):
                 if opt.lower() in expl.lower():
                     ans = letter
                     break
-             if ans not in ["A","B","C","D"]:
+            if ans not in ["A","B","C","D"]:
                 ans = random.choice(["A","B","C","D"])
+        valid.append({
+                "id": q.get("id", 0),
+                "question": q.get("question", ""),
+                "options": opts,
+                "answer": ans,
+                "explain_en": q.get("explain_en", ""),
+            })
+     
     return valid
 
 
@@ -915,9 +939,6 @@ async def send_practice_item(update_or_query, context: ContextTypes.DEFAULT_TYPE
         await safe_reply_message(update_or_query.message, txt, reply_markup=kb)
     else:
         await safe_edit_text(update_or_query, txt, reply_markup=kb)
-
-
-
 
   
 # =========================================================
@@ -1532,15 +1553,11 @@ async def on_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 reply_markup=main_menu(lang)
             )
 
-        # 🧩 Sinh 3 câu hỏi nhỏ về từ vừa tra
-        flavors = ["vocab_synonyms", "vocab_antonyms", "vocab_context"]
-        all_items = []
-        for f in flavors:
-            try:
-                sub = await build_mcq(word, lang, prefs["cefr"], flavor=f)
-                all_items.extend(sub[:1])   # chỉ lấy 1 câu mỗi loại 
-            except Exception as e:
-                logger.warning(f"vocab:quiz build_mcq failed for {f}: {e}")
+       # 🧩 Chỉ gọi 1 lần build_mcq để tránh timeout
+        sub = await build_mcq(word, lang, prefs["cefr"], flavor="vocab_mixed")
+
+        # Lấy 3 câu đầu
+        items = sub[:3]
 
         # 🔍 Lọc trùng câu hỏi nếu có
         seen = set()
@@ -1626,13 +1643,11 @@ async def on_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not topic:
             return await safe_edit_text(q, "No grammar topic found.", reply_markup=main_menu(lang))
 
-        # 🔹 Sinh 3 câu hỏi (mỗi loại 1 câu)
-        flavors = ["grammar_verbs", "grammar_errors", "grammar_order"]
-        all_items = []
-        for f in flavors:
-            sub = await build_mcq(topic, lang, prefs["cefr"], flavor=f)
-            all_items.extend(sub[:1])
-        items = all_items[:3]
+        # 🔹 Sinh 3 câu hỏi ngữ pháp (chỉ 1 lần API)
+        sub = await build_mcq(topic, lang, prefs["cefr"], flavor="grammar_mixed")
+
+        # Lấy 3 câu đầu
+        items = sub[:3]
 
         # Sau khi tạo all_items
         seen = set()
@@ -1746,9 +1761,11 @@ async def on_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await safe_edit_text(q, f"📖 Text:\n\n{trim(passage[:1800])}")
         await asyncio.sleep(1)
 
-        # Sinh 5 câu hỏi chi tiết dựa theo đoạn đọc
-        items = await build_mcq(passage, lang, prefs["cefr"], flavor="reading_details")
-        items = items[:5]
+        # 🔹 Sinh câu hỏi đọc hiểu (1 lần API, type "reading_mixed")
+        sub = await build_mcq(passage, lang, prefs["cefr"], flavor="reading_mixed")
+
+        # Lấy 5 câu đầu
+        items = sub[:5]
 
         if not items:
             return await safe_reply_message(
