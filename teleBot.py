@@ -28,7 +28,22 @@ def keep_alive():
             pass
         time.sleep(300)
 
-
+def remove_markdown(text: str) -> str:
+    if not isinstance(text, str):
+        return text
+    # Loại bỏ **bold**
+    text = re.sub(r"\*\*(.*?)\*\*", r"\1", text)
+    # Loại bỏ *italic*
+    text = re.sub(r"\*(.*?)\*", r"\1", text)
+    # Loại bỏ __bold__
+    text = re.sub(r"__(.*?)__", r"\1", text)
+    # Loại bỏ _italic_
+    text = re.sub(r"_(.*?)_", r"\1", text)
+    # Loại bỏ inline code `...`
+    text = re.sub(r"`(.*?)`", r"\1", text)
+    # Loại bỏ link dạng [title](url)
+    text = re.sub(r"\[(.*?)\]\(.*?\)", r"\1", text)
+    return text
 # --- SIMPLE VOCAB BANK HANDLER ---
 def add_vocab_to_bank(context, word: str):
     """Lưu từ vựng vào bộ nhớ tạm (per-user)."""
@@ -393,10 +408,12 @@ async def ask_openai(messages, max_tokens=450, temperature=0.4):
                 model=MODEL_NAME, messages=messages,
                 max_tokens=max_tokens, temperature=temperature
             )
-            return resp.choices[0].message.content
+            raw = resp.choices[0].message.content
+            return remove_markdown(raw)
         except Exception as e:
             logger.warning("ask_openai fail: %s", e)
             await asyncio.sleep(0.8)
+
     return "[Error: model not responding]"
 
 
@@ -1975,7 +1992,6 @@ async def on_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
 
-
         # === TALK MODE ENTRY ===
     if data == "menu:talk":
         prefs["mode"] = "talk"
@@ -2557,15 +2573,15 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await send_practice_item(update, context)
         await log_event(context, "practice_start", uid, {"topic": text, "count": len(items)})
         return
-
-
-
    
-    # --- DEFAULT CHAT MODE ---
+        # =========================================================
+    # 🌐 DEFAULT CHAT MODE (with memory)
+    # =========================================================
     if intent == "chat":
+
+        # 1) Đếm từ để detect long text
         word_count = len(re.findall(r"[A-Za-z]+", text))
- 
-        # 🧩 Nếu học sinh gửi đoạn văn dài, gợi ý hành động
+
         if word_count >= 60 and not re.search(r"\b(translate|gloss|summarize|explain|correct|question)\b", text, re.I):
             msg = (
                 "I see a long text. Would you like me to summarize, check grammar, or explain it?"
@@ -2573,69 +2589,77 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "Я вижу длинный текст. Хочешь, я помогу с кратким изложением, грамматикой или объяснением?"
             )
             await safe_reply_message(update.message, msg)
-            await log_event(context, "long_text_detected", update.effective_user.id, {"words": word_count})
-            # ❗ Không return — để bot vẫn phản hồi như chat bình thường
+            await log_event(context, "long_text_detected", uid, {"words": word_count})
 
-        # 🧠 Chat tự nhiên
-        msgs = [
-            {"role": "system", "content": POLICY_CHAT},
-            {"role": "user", "content": text}
-        ]
+        # =========================================================
+        # 2) MEMORY — lưu history 8 lượt gần nhất
+        # =========================================================
+        history = context.user_data.get("chat_history", [])
+
+        # Thêm message hiện tại
+        history.append({"role": "user", "content": text})
+
+        # Giới hạn 8 message cuối
+        history = history[-8:]
+        context.user_data["chat_history"] = history
+
+        # =========================================================
+        # 3) Chuẩn bị messages gửi OpenAI
+        # =========================================================
+        msgs = [{"role": "system", "content": POLICY_CHAT}]
+        msgs.extend(history)
+
+        # =========================================================
+        # 4) Gửi request OpenAI
+        # =========================================================
         reply = await ask_openai(msgs, max_tokens=350)
 
-        # 💬 Chỉ phản hồi text — không thêm nút menu
+        # Lưu reply vào memory để giữ ngữ cảnh
+        context.user_data["chat_history"].append({"role": "assistant", "content": reply})
+        context.user_data["chat_history"] = context.user_data["chat_history"][-8:]
+
+        # =========================================================
+        # 5) Trả lời
+        # =========================================================
+        reply = remove_markdown(await ask_openai(msgs, max_tokens=350))
+
         await safe_reply_message(update.message, trim(reply))
-
         await log_event(context, "chat_message", uid, {"chars": len(text)})
-        await maybe_nudge(update, context, lang)
+
+        # =========================================================
+        # 6) Nhắc nhở định kỳ sau 10 lượt
+        # =========================================================
+        chat_turns = context.user_data.get("chat_turns", 0) + 1
+        context.user_data["chat_turns"] = chat_turns
+
+        if chat_turns >= 10:
+            warn_msg = (
+                "⚠️ Reminder: I'm an AI tutor and may make mistakes. Please double-check important information."
+                if lang != "ru" else
+                "⚠️ Напоминание: я искусственный интеллект и могу ошибаться. Проверяй важные сведения."
+            )
+            await safe_reply_message(update.message, warn_msg)         
+            context.user_data["chat_turns"] = 0  # reset
+
         return
 
 
-
-# =========================================================
-   
-
-    # 2️⃣ Smart Grammar detector for textbook-style exercises
+    # =========================================================
+    # 📘 SMART GRAMMAR DETECTION (before CHAT MODE)
+    # =========================================================
     if re.search(r"\b(fill in|underline|choose|complete|correct)\b", text.lower()):
-        msg = ("It looks like a grammar exercise. "
-               "I can guide you step by step instead of giving direct answers. "
-               "What grammar topic is this about?")
-        await safe_reply_message(update.message, msg)
-        await log_event(context, "textbook_ex_detected", update.effective_user.id, {"text": text[:80]})
-        return
-
-
- 
-    reply = await ask_openai(msgs, max_tokens=350)
-    await safe_reply_message(update.message, trim(reply), reply_markup=main_menu(lang))
-    await log_event(context, "chat_message", uid, {"chars": len(text)})
-    await maybe_nudge(update, context, lang)
-
-           
-# --- Nhắc nhở định kỳ trong chế độ chat ---
-    chat_turns = context.user_data.get("chat_turns", 0) + 1
-    context.user_data["chat_turns"] = chat_turns
-
-    if chat_turns == 10:
-        warn_msg = (
-            "⚠️ Reminder: I'm an AI tutor and may make mistakes. "
-            "Please double-check important information."
+        msg = (
+            "It looks like a grammar exercise. "
+            "I can help you understand the rule step-by-step instead of giving direct answers. "
+            "What grammar topic is this about?"
             if lang != "ru" else
-            "⚠️ Напоминание: я искусственный интеллект и могу ошибаться. "
-            "Проверяй важные сведения."
+            "Похоже на задание по грамматике. "
+            "Я могу помочь тебе понять правило шаг за шагом. "
+            "О какой грамматике идёт речь?"
         )
-        kb = InlineKeyboardMarkup([
-            [InlineKeyboardButton("🏠 Menu", callback_data="menu:root")]
-        ])
-        await safe_reply_message(update.message, warn_msg, reply_markup=kb)
-        context.user_data["chat_turns"] = 0  # reset sau khi nhắc
-
-
-   # --- DEFAULT CHAT ---
-    msgs = [
-        {"role": "system", "content": POLICY_CHAT},
-        {"role": "user", "content": text}
-    ]
+        await safe_reply_message(update.message, msg)
+        await log_event(context, "textbook_ex_detected", uid, {"text": text[:80]})
+        return
 
 # =========================================================
  # HANDLE IMAGE INPUT
