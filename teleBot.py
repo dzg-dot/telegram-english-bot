@@ -1154,7 +1154,7 @@ async def reflect_handle_text(update, context):
     # next question = step + 1 → index = (step+1)-1
     st["step"] = step + 1
     next_q = REFLECT_Q[lang][st["step"] - 1]
-    await send_reflect_question(update, next_q)
+    return await send_reflect_question(update, next_q)
 
 
 # ---------- 6) HANDLE MULTIPLE CHOICE ANSWERS (Q1–Q5) ----------
