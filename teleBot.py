@@ -342,8 +342,8 @@ HELP_TEXT_EN = (
     "🟢 Reading:\n"
     "- Write a short A2 text about 'friendship'\n"
     "- Translate gloss for this text: <your text>\n"
-    "🟢 Talk:\n"
-    "- Let's talk about school life\n"
+    "🟢 *Navigation:*\n"
+    "- Type /menu to return to the main menu anytime.\n"
 )
 HELP_TEXT_RU = (
     "💡 Примеры промптов:\n\n"
@@ -354,8 +354,8 @@ HELP_TEXT_RU = (
     "🟢 Чтение:\n"
     "- Короткий текст уровня A2 на тему 'дружба'\n"
     "- Глоссы для текста: <вставь текст>\n"
-    "🟢 Разговор:\n"
-    "- Поговорим о школьной жизни\n"
+    "🟢 *Навигация:*\n"
+    "- Напиши /menu, чтобы вернуться в главное меню."
 )
 
 
@@ -2049,16 +2049,6 @@ async def on_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await log_event(context, "talk_more_ideas", uid, {"topic": topic})
         return
 
-
-    # --- HELP MENU CALLBACK ---
-    if data == "menu:help":
-        txt = HELP_TEXT_RU if lang == "ru" else HELP_TEXT_EN
-        await safe_edit_text(q, txt, reply_markup=main_menu(lang))
-        await log_event(context, "help_open", uid, {})
-        return
-
-
-
 # =========================================================
 # 13) TALK COACH & NUDGE SYSTEM
 # =========================================================
@@ -2205,8 +2195,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return 
 
     # === INTENT DETECTION ===
-# ✅ 2. Xác định intent sớm, trước khi xử lý grammar hint
-
     # ✅ 2️⃣ Prompt-locked intent detection
     t = text.lower()
     intent = "chat"
@@ -2223,10 +2211,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif re.fullmatch(r"write\s+(a\s+short\s+)?(a1|a2|b1|b1\+)?\s*text\s+about\s+['\"]?.+['\"]?", t.strip()) \
         or re.fullmatch(r"translate\s+gloss\s+for\s+this\s+text[:\-]?\s*.+", t.strip()):
         intent = "reading"
-
-    # --- TALK ---
-    elif re.fullmatch(r"let'?s\s+talk\s+about\s+.+", t.strip()):
-        intent = "talk"
 
     logger.info(f"🎯 Prompt-locked intent: {intent}")
 
