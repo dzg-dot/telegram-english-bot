@@ -67,7 +67,9 @@ async def on_error(update: object, context: ContextTypes.DEFAULT_TYPE):
     logger.exception("Error:", exc_info=context.error)
     try:
         uid = getattr(getattr(update, "effective_user", None), "id", "n/a")
-        await log_event(context, "error", uid, {"error": str(context.error)})
+        asyncio.create_task(
+            log_event(context, "error", uid, {"error": str(context.error)})
+        )
     except Exception:
         pass
 
@@ -191,7 +193,8 @@ def make_user_hash(uid, salt):
 # 5) LOGGING TO GOOGLE SHEET (ANONYMOUS)
 # =========================================================
 async def log_event(context, event, user_id, extra=None):
-    if not GSHEET_WEBHOOK: return
+    if not GSHEET_WEBHOOK:
+        return
     try:
         ts = datetime.now(timezone.utc).isoformat()
         anon = make_user_hash(user_id, LOG_SALT)
@@ -201,9 +204,17 @@ async def log_event(context, event, user_id, extra=None):
             "event": event,
             "extra": extra or {}
         }
-        await asyncio.to_thread(
-            httpx_client.post, GSHEET_WEBHOOK, json=payload, timeout=10.0
+
+        # CHẠY NỀN — KHÔNG BLOCK BOT
+        asyncio.create_task(
+            asyncio.to_thread(
+                httpx_client.post,
+                GSHEET_WEBHOOK,
+                json=payload,
+                timeout=3.0
+            )
         )
+
     except Exception as e:
         logger.warning("log_event failed: %s", e)
 # =========================================================
@@ -283,7 +294,7 @@ async def back_to_menu(update_or_query, context: ContextTypes.DEFAULT_TYPE, lang
             await safe_reply_message(update_or_query.message, msg, reply_markup=main_menu(lang))
         except Exception:
             pass
-    await log_event(context, "menu_return", update_or_query.effective_user.id if hasattr(update_or_query, "effective_user") else "n/a", {"lang": lang})
+    asyncio.create_task(log_event(context, "menu_return", update_or_query.effective_user.id if hasattr(update_or_query, "effective_user") else "n/a", {"lang": lang}))
 
 
 
@@ -368,8 +379,14 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         [InlineKeyboardButton("English", callback_data="set_lang:en"),
          InlineKeyboardButton("Русский", callback_data="set_lang:ru")]
     ])
+
+    # 👉 1) Luôn trả lời user NGAY (không chờ log)
     await safe_reply_message(update.message, greet, reply_markup=kb)
-    await log_event(context, "start", update.effective_user.id, {})
+
+    # 👉 2) Ghi log ở chế độ NỀN (non-blocking)
+    asyncio.create_task(
+        log_event(context, "start", update.effective_user.id, {})
+    )
 
 
 # --- MENU COMMAND HANDLER ---
@@ -382,7 +399,7 @@ async def handle_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     lang = prefs.get("lang", "en")
     await safe_reply_message(update.message, "📋 Main menu:", reply_markup=main_menu(lang))
-    await log_event(context, "menu_command", update.effective_user.id, {})
+    asyncio.create_task(log_event(context, "menu_command", update.effective_user.id, {}))
 
 async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     prefs = get_prefs(update.effective_user.id)
@@ -395,7 +412,7 @@ async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     ])
 
     await safe_reply_message(update.message, txt, reply_markup=kb)
-    await log_event(context, "help_open", update.effective_user.id, {"lang": lang})
+    asyncio.create_task(log_event(context, "help_open", update.effective_user.id, {"lang": lang}))
 
 
 # =========================================================
@@ -1041,13 +1058,13 @@ async def practice_summary(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await safe_reply_message(update.message, trim("\n".join(lines)), reply_markup=kb)
 
     # --- Log result ---
-    await log_event(context, "practice_done", update.effective_user.id, {
+    asyncio.create_task(log_event(context, "practice_done", update.effective_user.id, {
         "type": ptype,
         "topic": st.get("topic"),
         "scope": scope,
         "score": score,
         "total": total
-    })
+    }))
 
 # =========================================================
 # 11.5 REFLECT MODE — 7-Question Self-Assessment (FIXED)
@@ -1276,7 +1293,7 @@ async def reflect_finalize(update_or_query, context):
 
     # --- LOG EVENT ---
     try:
-        await log_event(context, "reflect", update_or_query.effective_user.id, {"answers": answers})
+        asyncio.create_task(log_event(context, "reflect", update_or_query.effective_user.id, {"answers": answers}))
     except:
         pass
 
@@ -1338,14 +1355,14 @@ async def on_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 [InlineKeyboardButton("🏠 Main menu", callback_data="menu:root_force")]
             ])
             await safe_edit_text(q, txt, reply_markup=kb)
-            await log_event(context, "menu_back_to_practice", uid, {"lang": lang})
+            asyncio.create_task(log_event(context, "menu_back_to_practice", uid, {"lang": lang}))
             return
 
         # Còn nếu đang ở quiz hoặc ở bất kỳ layer nào khác → về main menu
         context.user_data.clear()
         msg = "📋 Back to main menu." if lang != "ru" else "📋 Возврат в главное меню."
         await safe_edit_text(q, msg, reply_markup=main_menu(lang))
-        await log_event(context, "menu_root", uid, {})
+        asyncio.create_task(log_event(context, "menu_root", uid, {}))
         return
 
     # === LANGUAGE SELECT ===
@@ -1362,7 +1379,7 @@ async def on_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
         prefs["lang"] = lang
         txt = "Language set to English." if lang == "en" else "Язык: Русский."
         await safe_edit_text(q, txt, reply_markup=main_menu(lang))
-        await log_event(context, "lang_set", uid, {"lang": lang})
+        asyncio.create_task(log_event(context, "lang_set", uid, {"lang": lang}))
         return
 
     # === GRADE SELECT ===
@@ -1389,7 +1406,7 @@ async def on_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
             txt = (f"Grade set to {g} (level {prefs['cefr']})."
                    if lang != "ru" else f"Класс {g} (уровень {prefs['cefr']}).")
             await safe_edit_text(q, txt, reply_markup=main_menu(lang))
-            await log_event(context, "grade_set", uid, {"grade": g, "cefr": prefs["cefr"]})
+            asyncio.create_task(log_event(context, "grade_set", uid, {"grade": g, "cefr": prefs["cefr"]}))
         return
 
     # === HELP MENU ===
@@ -1397,7 +1414,7 @@ async def on_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
         txt = HELP_TEXT_RU if lang == "ru" else HELP_TEXT_EN
         kb = InlineKeyboardMarkup([[InlineKeyboardButton("🏠 Back to menu", callback_data="menu:root")]])
         await safe_edit_text(q, txt, reply_markup=kb)
-        await log_event(context, "help_open", uid, {})
+        asyncio.create_task(log_event(context, "help_open", uid, {}))
         return
 
 # === ENTER PRACTICE MENU FROM MAIN MENU ===
@@ -1410,7 +1427,7 @@ async def on_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
             [InlineKeyboardButton("🏠 Back to menu", callback_data="menu:root")]
         ])
         await safe_edit_text(q, txt, reply_markup=kb)
-        await log_event(context, "menu_practice_enter", uid, {})
+        asyncio.create_task(log_event(context, "menu_practice_enter", uid, {}))
         return
 
     # === MAIN PRACTICE MENU ===
@@ -1563,7 +1580,7 @@ async def on_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         # 🚀 Gửi câu hỏi đầu tiên
         await send_practice_item(update.callback_query, context)
-        await log_event(context, "practice_start", uid, {"group": group, "flavor": flavor})
+        asyncio.create_task(log_event(context, "practice_start", uid, {"group": group, "flavor": flavor}))
         return
 
           # === VOCABULARY QUICK QUIZ (Practice this word) ===
@@ -1606,7 +1623,7 @@ async def on_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         # 🚀 Gửi câu hỏi đầu tiên
         await send_practice_item(q, context)
-        await log_event(context, "vocab_quiz", uid, {"word": word})
+        asyncio.create_task(log_event(context, "vocab_quiz", uid, {"word": word}))
         return
 
 
@@ -1642,7 +1659,7 @@ async def on_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ])
 
         await safe_edit_text(q, trim(out), reply_markup=kb)
-        await log_event(context, "vocab_more_examples", uid, {"word": word})
+        asyncio.create_task(log_event(context, "vocab_more_examples", uid, {"word": word}))
         return
 
 
@@ -1682,7 +1699,7 @@ async def on_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         # 🚀 Gửi câu 1
         await send_practice_item(q, context)
-        await log_event(context, "grammar_practice_start", uid, {"topic": topic, "count": len(items)})
+        asyncio.create_task(log_event(context, "grammar_practice_start", uid, {"topic": topic, "count": len(items)}))
         return
 
 
@@ -1701,7 +1718,7 @@ async def on_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
             [InlineKeyboardButton("🏠 Menu", callback_data="menu:root")]
         ])
         await safe_edit_text(q, trim(out), reply_markup=kb)
-        await log_event(context, "grammar_explain_more", uid, {"topic": topic})
+        asyncio.create_task(log_event(context, "grammar_explain_more", uid, {"topic": topic}))
         return
 
 
@@ -1738,7 +1755,7 @@ async def on_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
             [InlineKeyboardButton("🏠 Back to menu", callback_data="menu:root")]
         ])
         await safe_reply_message(update.callback_query.message, "—", reply_markup=kb)
-        await log_event(context, "reading_gloss_done", uid, {"chars": len(passage)})
+        asyncio.create_task(log_event(context, "reading_gloss_done", uid, {"chars": len(passage)}))
         return
 
 
@@ -1750,7 +1767,7 @@ async def on_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
         glossed = await build_reading_gloss(passage, lang, translate_mode=True)
         kb = InlineKeyboardMarkup([[InlineKeyboardButton("🏠 Menu", callback_data="menu:root")]])
         await safe_edit_text(q, trim(glossed), reply_markup=kb)
-        await log_event(context, "image_gloss", uid, {"chars": len(text)})
+        asyncio.create_task(log_event(context, "image_gloss", uid, {"chars": len(text)}))
         return
 
 
@@ -1791,7 +1808,7 @@ async def on_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.user_data["menu_layer"] = "quiz"
 
         await send_practice_item(q, context)
-        await log_event(context, "reading_practice_start", uid, {"topic": topic, "count": len(items)})
+        asyncio.create_task(log_event(context, "reading_practice_start", uid, {"topic": topic, "count": len(items)}))
         return
 
 
@@ -1844,7 +1861,7 @@ async def on_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
         }
 
         await send_practice_item(update.callback_query, context)
-        await log_event(context, "nudge_quiz_start", uid, {"topic": topic, "flavor": flavor})
+        asyncio.create_task(log_event(context, "nudge_quiz_start", uid, {"topic": topic, "flavor": flavor}))
         return
 
     if data == "nudge:skip":
@@ -1855,7 +1872,7 @@ async def on_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "⏭ Хорошо, пропустим мини-викторину."
         )
         await safe_edit_text(q, msg, reply_markup=main_menu(lang))
-        await log_event(context, "nudge_skip", uid, {})
+        asyncio.create_task(log_event(context, "nudge_skip", uid, {}))
         return
 
 
@@ -1979,7 +1996,7 @@ async def on_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
             context.user_data["menu_layer"] = "exercise"
 
             await send_practice_item(q, context)
-            await log_event(context, "practice_regenerated", uid, {"scope": scope, "topic": topic, "count": len(items)})
+            asyncio.create_task(log_event(context, "practice_regenerated", uid, {"scope": scope, "topic": topic, "count": len(items)}))
 
         except Exception as e:
             logger.warning(f"footer:again error: {e}")
@@ -2027,7 +2044,7 @@ async def on_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await safe_edit_text(q, msg, reply_markup=kb)
         await safe_reply_message(update.callback_query.message, f"💡 Tip: {tip}")
 
-        await log_event(context, "talk_mode_started", uid, {})
+        asyncio.create_task(log_event(context, "talk_mode_started", uid, {}))
         return
 
     # === TALK: MORE IDEAS ===
@@ -2046,7 +2063,7 @@ async def on_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
             [InlineKeyboardButton("🏠 Menu", callback_data="menu:root")]
         ])
         await safe_edit_text(q, trim(out), reply_markup=kb)
-        await log_event(context, "talk_more_ideas", uid, {"topic": topic})
+        asyncio.create_task(log_event(context, "talk_more_ideas", uid, {"topic": topic}))
         return
 
 # =========================================================
@@ -2121,8 +2138,8 @@ async def talk_coach(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.user_data.pop("talk", None)
         return
 
-    await log_event(context, "talk_message", update.effective_user.id,
-                    {"topic": topic, "turns": state["turns"]})
+    asyncio.create_task(log_event(context, "talk_message", update.effective_user.id,
+                    {"topic": topic, "turns": state["turns"]}))
 
 
 # --- Nudge mini-quiz ---
@@ -2163,7 +2180,7 @@ async def maybe_nudge(update, context, lang):
              InlineKeyboardButton("⏭ Skip", callback_data="nudge:skip")]
         ])
         await safe_reply_message(update.message, msg, reply_markup=kb)
-        await log_event(context, "nudge_offer", update.effective_user.id, {})
+        asyncio.create_task(log_event(context, "nudge_offer", update.effective_user.id, {}))
 
 
 # =========================================================
@@ -2240,7 +2257,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "но не решаю задачи по математике/физике."
             )
             await safe_reply_message(update.message, msg)
-            await log_event(context, "out_of_scope", uid, {"query": text})
+            asyncio.create_task(log_event(context, "out_of_scope", uid, {"query": text}))
             return
 
     # --- AUTO GRAMMAR HINT  ---
@@ -2265,7 +2282,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         for pattern, hint in grammar_hints:
             if re.search(pattern, text, re.I):
                 await safe_reply_message(update.message, f"💡 Grammar hint: {hint}")
-                await log_event(context, "grammar_hint", update.effective_user.id, {"hint": hint})
+                asyncio.create_task(log_event(context, "grammar_hint", update.effective_user.id, {"hint": hint}))
                 break
 
 	
@@ -2282,7 +2299,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             prefs["mode"] = "chat"
             msg = "Exited talk mode. Back to main menu." if lang != "ru" else "Выход из разговора. Главное меню."
             await safe_reply_message(update.message, msg, reply_markup=main_menu(lang))
-            await log_event(context, "talk_exit", uid, {})
+            asyncio.create_task(log_event(context, "talk_exit", uid, {}))
             return
 
         # --- Trả lời hội thoại ---
@@ -2334,7 +2351,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         # --- Gửi phản hồi bình thường ---
         await safe_reply_message(update.message, trim(reply))
-        await log_event(context, "talk_message", uid, {"topic": topic, "turns": talk_state["turns"]})
+        asyncio.create_task(log_event(context, "talk_message", uid, {"topic": topic, "turns": talk_state["turns"]}))
         return
 
 
@@ -2361,7 +2378,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "Я вижу длинный текст. Хочешь, я помогу с кратким изложением, глоссой или грамматикой?"
         )
         await safe_reply_message(update.message, msg)
-        await log_event(context, "long_text_redirected", uid, {"words": word_count})
+        asyncio.create_task(log_event(context, "long_text_redirected", uid, {"words": word_count}))
         # Không return để bot vẫn có thể phản hồi tiếp
 
 
@@ -2397,7 +2414,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await safe_reply_message(update.message, trim(card), reply_markup=kb)
 
         # 🧾 Ghi log
-        await log_event(context, "vocab_card", uid, {"word": word})
+        asyncio.create_task(log_event(context, "vocab_card", uid, {"word": word}))
         await maybe_nudge(update, context, lang)
         return await maybe_nudge(update, context, lang) 
 
@@ -2421,7 +2438,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ])
 
         await safe_reply_message(update.message, trim(exp), reply_markup=kb)
-        await log_event(context, "grammar_explain", uid, {"topic": text})
+        asyncio.create_task(log_event(context, "grammar_explain", uid, {"topic": text}))
         return await maybe_nudge(update, context, lang)
 
    
@@ -2475,7 +2492,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 [InlineKeyboardButton("🏠 Back to menu", callback_data="menu:root")]
             ])
             await safe_reply_message(update.message, "—", reply_markup=kb)
-            await log_event(context, "reading_translate_gloss", uid, {"chars": len(passage)})
+            asyncio.create_task(log_event(context, "reading_translate_gloss", uid, {"chars": len(passage)}))
             return
 
         # 2️⃣ Nếu học sinh gửi text dài nhưng KHÔNG ra lệnh gì rõ ràng
@@ -2487,7 +2504,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 else "Я вижу длинный текст. Хочешь, я помогу с кратким изложением, грамматикой или объяснением?"
             )
             await safe_reply_message(update.message, msg)
-            await log_event(context, "reading_unclear_text", uid, {"words": word_count})
+            asyncio.create_task(log_event(context, "reading_unclear_text", uid, {"words": word_count}))
             # ❗ Không return — cho phép Chat Mode phản hồi tự nhiên sau đó
 
         # 3️⃣ Nếu học sinh chỉ gửi topic ngắn (ví dụ: 'animals', 'friendship')
@@ -2505,7 +2522,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 [InlineKeyboardButton("🏠 Menu", callback_data="menu:root")]
             ])
         )
-        await log_event(context, "reading_passage", uid, {"topic": topic, "mode": "auto_topic"})
+        asyncio.create_task(log_event(context, "reading_passage", uid, {"topic": topic, "mode": "auto_topic"}))
         return await maybe_nudge(update, context, lang)
 
 
@@ -2518,7 +2535,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await safe_reply_message(update.message, greet, reply_markup=InlineKeyboardMarkup([
             [InlineKeyboardButton("🏠 Menu", callback_data="menu:root")]
         ]))
-        await log_event(context, "talk_start", uid, {})
+        asyncio.create_task(log_event(context, "talk_start", uid, {}))
         return
 
     # --- PRACTICE ---
@@ -2555,7 +2572,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         }
 
         await send_practice_item(update, context)
-        await log_event(context, "practice_start", uid, {"topic": text, "count": len(items)})
+        asyncio.create_task(log_event(context, "practice_start", uid, {"topic": text, "count": len(items)}))
         return
    
         # =========================================================
@@ -2573,7 +2590,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "Я вижу длинный текст. Хочешь, я помогу с кратким изложением, грамматикой или объяснением?"
             )
             await safe_reply_message(update.message, msg)
-            await log_event(context, "long_text_detected", uid, {"words": word_count})
+            asyncio.create_task(log_event(context, "long_text_detected", uid, {"words": word_count}))
 
         # =========================================================
         # 2) MEMORY — lưu history 8 lượt gần nhất
@@ -2608,7 +2625,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         reply = remove_markdown(await ask_openai(msgs, max_tokens=350))
 
         await safe_reply_message(update.message, trim(reply))
-        await log_event(context, "chat_message", uid, {"chars": len(text)})
+        asyncio.create_task(log_event(context, "chat_message", uid, {"chars": len(text)}))
 
         # =========================================================
         # 6) Nhắc nhở định kỳ sau 10 lượt
@@ -2642,7 +2659,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "О какой грамматике идёт речь?"
         )
         await safe_reply_message(update.message, msg)
-        await log_event(context, "textbook_ex_detected", uid, {"text": text[:80]})
+        asyncio.create_task(log_event(context, "textbook_ex_detected", uid, {"text": text[:80]}))
         return
 
 # =========================================================
@@ -2686,7 +2703,7 @@ async def handle_image(update: Update, context: ContextTypes.DEFAULT_TYPE):
         for pattern, hint in grammar_hints:
             if re.search(pattern, text, re.I):
                 await safe_reply_message(update.message, f"💡 Grammar hint: {hint}")
-                await log_event(context, "image_grammar_hint", update.effective_user.id, {"hint": hint})
+                asyncio.create_task(log_event(context, "image_grammar_hint", update.effective_user.id, {"hint": hint}))
                 matched = True
                 break
 
